@@ -39,6 +39,16 @@ export const UPSTREAM_VALIDATED_VERSIONS = [
 ] as const
 
 /**
+ * Every validated release line. Both rc.6 and rc.7 are first-class; a
+ * profile running either line must not see drift. Anything outside this
+ * list is unvalidated and keeps warning.
+ */
+export const UPSTREAM_VALIDATED_VERSIONS: readonly string[] = [
+  '0.1.0-rc.6',
+  '0.1.0-rc.7',
+]
+
+/**
  * Framework packages version on their own lines; the contract validates
  * their MAJOR (breaking surface), not the harness rc number.
  */
