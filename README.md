@@ -52,10 +52,26 @@
 
 ## 核心能力
 
+Windows Terminal 支持 Sixel 时，全屏会话记录可直接显示内嵌缩略图，点击后打开大图预览；非全屏 inline 模式仍保留文字回退。
+Sixel 使用最多 256 色的自适应调色板，透明像素与背景合成；Worker 缓存量化结果，滚动时仅编码可见部分，移出视野或被浮层覆盖时擦除旧图。
+附件读取与解码最多两路并发；最后一个使用者离开后取消读取，未启动的解码不再执行。多图缓存、排队任务与单帧传输均有容量上限，超限时保留文字回退。
+自动探测优先 Kitty，其次使用 DA1 声明的 Sixel 能力。`DSH_TUI_IMAGE_PROTOCOL=auto|kitty|sixel|none` 可覆盖协议选择；
+`DSH_TUI_DISABLE_TERMINAL_IMAGES=1`、无障碍模式、非 TTY 输出以及 tmux/screen 仍禁用图形。
+缺少图片依赖或编码失败时保留文字回退；强制协议也不会启用 inline Sixel。
+浅色主题的面板和图片预览默认使用白底，图片预览边框使用中性色。
+大图预览以对话区约 95% 宽高为预算，最长边可达 2048 像素，仍限制总像素量和后台开销；缩略图大小不变。
+预览支持适应窗口、100% 原像素与 200%/400%/800% 放大，拖动、滚轮或方向按钮平移；100% 需终端报告字符格像素尺寸。
+底部「打开原图」链接直接调用系统看图程序，打开未经重编码的原始附件，包括从历史会话恢复的图片。
+大图弹窗用 `←`/`→` 或底部 `‹`/`›` 切换上一张、下一张，显示当前张数，首尾不循环；切图回到适应窗口。
+
   - **终端交互**：低资源占用，长会话稳定可靠；多种主题切换，样式美观，实时显示工作状态、TPS、缓存命中率等
-    推理等级、输入/输出 token 与 Git/会话信息；终端卡多行命令可经 `/settings` 折叠为首行 + 计数提示（Ctrl+O 或点击卡片展开）。
-  - **功能全面**：`/resume`、`/new`、`/compact`、`/export`、`/btw`，模型热切换，原生subagent，会话fork，自动更新；可在vs code中[以vscode插件形式启动](docs/vscode.md)，已上架 VS Code Marketplace。
+    推理等级、输入/输出 token 与 Git/会话信息；终端卡多行命令可经 `/settings` 折叠为首行 + 计数提示（Ctrl+O 或点击卡片展开）；全屏模式下悬停在截断的工具卡标题、用户消息或会话标题上约 600ms，浮层显示完整内容。
+    用户附图及助手/工具结果中的持久图片块会直接显示在会话记录中；Kitty graphics 或 Sixel 可用时显示等比缩略图，否则保留同尺寸文字回退。全屏下点击输入框 `[Image #N]` 或 transcript 缩略图在对话区域居中打开大图预览，卡片外的对话文字变暗，不遮挡输入栏（Esc/点击外部关闭），标题为 `Image #N — 格式 · 尺寸 · 体积 · 文件名`，本会话暂存的图片在卡片底行显示来源路径；Finder 复制的图片文件粘贴时直接入附件库为 `[Image #N]`；输入框里的 `[Image #N]` 是一个整体，光标整体跳过、删除整体生效，光标落在其上时整块反显并自动打开预览、离开时关闭。Vim 的 `x`/`X`/`d…` 同样整张删除，`u` 同时恢复文字与附件；撤销仅限当前草稿。
+    终端图片预览默认开启，可在 `/settings → 终端图片预览` 或配置 `terminalImages: false` 中关闭，使用 `/restart` 后生效。已保存的 `/settings` 选择优先于 Cordis 配置；若曾保存为开启，请在 `/settings` 中关闭后再 `/restart`。关闭时保留文字信息并跳过预览解码，不影响向模型发送图片；`DSH_TUI_DISABLE_TERMINAL_IMAGES=1` 始终强制关闭预览。
+  - **功能全面**：`/resume` 按工作目录分类浏览、搜索与预览历史会话（左键恢复、右键弹出操作菜单；可固定常用会话——「已固定」分组置顶显示，行内 ★ 或 `Ctrl+P` 切换，持久化到 `~/.dsh-tui`），另有 `/agentview` 会话总览（CC 同款 agent view：空输入 `←` 一键后台化，后台会话派发/预览/回复/停止一站式管理）、`/new`、`/compact`、`/export`、`/btw`，模型热切换（新会话默认推理强度可在 /settings → 默认推理强度 预设），原生subagent，会话fork，自动更新，输入框 `/vim` vim 编辑模式、鼠标选区编辑（拖选高亮、Shift+click 扩展、双击选词、Ctrl+C 复制选区）与全屏草稿编辑（`Ctrl+Shift+E` 或输入行 `⛶` 按钮：行号 + 当前行高亮、Enter 换行、Ctrl+Enter 发送、滚轮滚动、点击/拖选，长草稿独占整屏；`/settings` 可关）；可在vs code中[以vscode插件形式启动](docs/vscode.md)，已上架 VS Code Marketplace。
   - **扩展丰富**：原生浏览器交互，compter use等大量附属功能性扩展
+  - **技能归 DSH 管理**：`/skills` 展示当前 profile、用户与项目发现的技能；dsh-TUI 不预装通用技能。
+  - **像素鲸鱼娘**：开屏随机三选一开场动画；**点击鲸鱼冒爱心**随时可用，`/settings → whaleIdle` 开启闲置动画后，开屏定格的鲸鱼会继续摆鱼鳍、拍尾巴，agent 工作时持续游动，空闲 10 秒入睡冒 Z，任何工作立即唤醒。鲸鱼娘的 22 帧手绘原图与闲置行为移植自 [dsh-ui-whale](https://github.com/lhh010/dsh-ui-whale)（作者 [@lhh010](https://github.com/lhh010)），特此致谢。
 
 
 
@@ -129,6 +145,20 @@ sh install.sh
 - **模板仓库**：[plugin-template](https://github.com/dsh-tui-ecosystem/plugin-template)（从模板起步，5 分钟出一个插件）
 - **参考实现**：`dsh-working-activity`（实时工作状态行：TUI 槽位 + `activity/status` 会话事件双出口）
 
+### 接缝稳定性参考
+
+按当前实现成熟度给出的**非正式**分级，帮助插件作者评估投入；正式状态与兼容性协定以
+[准入与开发指南](https://github.com/T-Auto/dsh-ecosystem-spec/blob/main/docs/plugin-admission-and-development.md)为准：
+
+| 分级 | 接缝 |
+| --- | --- |
+| 稳定候选（形态冻结；如有破坏性变更，先在次版本弃用告警再移除） | 六 设置区块 · 八 全屏场景 · 十 托管对话框 · 十一 状态行 · 十二 键盘快捷键 · 十三 条目渲染器 |
+| 实验性（仍可能随 dsh-std / 准入规范演进调整） | 九 决策事件 · toast 通知（`ctx.tuiToast`，新增） |
+| 跟随上游（稳定性由 cordis / dsh 官方机制决定） | 一 会话事件 · 二 官方 prompt 槽位 · 三 技能打包 · 四 主题 · 五 system prompt 段 · 七 profile 组合 |
+
+另：`@deepseek-harness-tui/dsh-tui/test-utils`（headless 准入/挂载测试助手）与
+`@deepseek-harness-tui/dsh-tui/api`（纯类型入口）为实验性公开面。
+
 
 
 ## 文档索引
@@ -137,7 +167,7 @@ sh install.sh
 | --- | --- |
 | [安装与快速开始](docs/getting-started.md) | 前置条件、安装、启动、profile 生命周期、源码开发 |
 | [配置参考](docs/configuration.md) | Cordis 覆盖、配置字段、Agent preset、MCP、环境变量 |
-| [主题系统](docs/themes.md) | 内置主题、自动检测、自定义 JSON 主题与校验规则 |
+| [主题系统](docs/themes.md) | 内置主题、自动检测、静态 JSON 与 npm 插件主题、校验规则 |
 | [交互与命令](docs/interaction.md) | 快捷键、鼠标、问卷、slash command 与会话工作流 |
 | [架构与限制](docs/architecture.md) | 运行链路、渲染与持久化设计、安全边界、已知限制 |
 | [VS Code 使用指南](docs/vscode.md) | 在 VS Code 集成终端运行 dsh-tui；companion 扩展 `dsh-tui-vscode` 提供与 Claude Code 官方扩展几乎一致的体验（已上架 Marketplace） |
@@ -152,18 +182,25 @@ sh install.sh
 
 - **生态组织**：[dsh-tui-ecosystem](https://github.com/dsh-tui-ecosystem) —— 社区插件、模板与收录列表的家。欢迎来发插件、提创意、互相取暖 🐋
 - **社区交流群**：使用问题、插件创意、功能许愿，都欢迎进来聊。
+- **行为准则**：参与前请读一遍[贡献者行为准则](CODE_OF_CONDUCT.md)。
 
-| 微信群 | QQ 群（群号 572549239） | 微信三群 |
-| :---: | :---: | :---: |
-| <img src="screenshots/wechat-group.jpg" alt="dsh-TUI 社区交流群微信群二维码" width="200"> | <img src="screenshots/qq-group.png" alt="dsh-TUI 社区交流群 QQ 群二维码" width="200"> | <img src="screenshots/wechat-group3.jpg" alt="dsh-TUI 社区交流群微信三群二维码" width="200"> |
+| 微信群（dsh-TUI 社区交流 4 群） | QQ 群（群号 572549239） |
+| :---: | :---: |
+| <img src="screenshots/wechat-group.jpg" alt="dsh-TUI 社区交流 4 群微信群二维码" width="200"> | <img src="screenshots/qq-group.png" alt="dsh-TUI 社区交流群 QQ 群二维码" width="200"> |
 
 > 微信群二维码约 7 天过期一次，如遇失效请走 QQ 群（572549239），或开个 issue 提醒我们更新。
 
 ## 权限与安全边界
 
-`dsh-TUI` 不实现独立沙箱，而是使用当前 DSH profile 的文件、Shell、sandbox 与 approval 策略。仓库提供的 profile 在非 Windows 平台默认采用工作区约束与审批；Windows 当前没有对应的沙箱后端，组合会退回到 `danger-full-access` 且不弹审批。在包含敏感凭证或不可信仓库的环境中启动前，请先检查 profile 配置。
+> **Windows 安全警告：** Windows profile 默认使用 `danger-full-access`，且 approval 默认是 `never`。这会授予工具不受限制的访问权限；在敏感凭证或不可信仓库环境中启动前，务必先检查并收紧 profile 配置。
+
+`dsh-TUI` 不实现独立沙箱，而是使用当前 DSH profile 的文件、Shell、sandbox 与 approval 策略。权限预设来自 DSH `permissionPresets` registry：服务缺失时使用 legacy 三项兼容名册；服务已挂载但为空、损坏或不一致时标记为 unavailable，TUI fail closed，不伪造名册。可用 registry 按声明顺序提供第三方预设并自动进入补全、picker 与 `Shift+Tab` 循环（排除 `custom`/`status`、canonical 预设、重复 identity 与不安全 token）；首次观察遵循 registry 顺序，后续刷新保留已见 identity 的相对顺序。服务可用时 `/permission` 以本地命令形式常驻菜单：切换优先调用官方 `/permission <preset>` 命令；命令行未暴露给本 agent 时，回退到 permissionPresets 服务自身的官方写路径（与命令 handler 同一实现，写真实 `permission/preset`/`sandbox/mode`/`approval/policy` 事件，绝不由 TUI 伪造），并以事件/读回确认；两条路都不可用时显式提示，绝不静默。计划模式退出先恢复进入前的 atom，再把权限身份还原到你进入前所在的预设（registry 仍提供时）。在包含敏感凭证或不可信仓库的环境中启动前，请先检查 profile 配置。
 
 详见[权限边界与已知限制](docs/architecture.md#权限与安全边界)。
+
+### 致谢
+
+- 像素鲸鱼娘的 22 帧手绘原图（Excel 逐格绘制）与闲置动画行为（摆鱼鳍、拍尾巴、入睡冒 Z、点击冒爱心）移植自 **[dsh-ui-whale](https://github.com/lhh010/dsh-ui-whale)**（DeepSeek Harness Web 端鲸鱼宠物插件，作者 [@lhh010](https://github.com/lhh010)，BSD-3-Clause），感谢作者与灵感 🐋💜
 
 ### 友情链接
 

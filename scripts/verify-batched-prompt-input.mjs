@@ -12,18 +12,31 @@
  */
 import { PassThrough, Writable } from 'node:stream'
 import React from 'react'
+import xtermHeadless from '@xterm/headless'
 import { render } from '../lib/types/ui.js'
 import { PromptInput } from '../lib/types/components/PromptInput.js'
-import { settled, sleep } from './lib/term-test.mjs'
+import { settled, sleep, viewportLines } from './lib/term-test.mjs'
+
+const { Terminal: XTerm } = xtermHeadless
 
 let failed = 0
+/** Print one pass/fail line and keep a running failure count. */
 function check(name, ok, extra = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}: ${name}${extra ? `  (${extra})` : ''}`)
   if (!ok) failed += 1
 }
 
-function makeStreams() {
-  const stdout = new Writable({ write(_chunk, _encoding, callback) { callback() } })
+/** Build the writable TTY streams used by the headless prompt harness. */
+function makeStreams(term) {
+  const stdout = new Writable({
+    write(chunk, _encoding, callback) {
+      if (term === undefined) {
+        callback()
+      } else {
+        term.write(String(chunk), callback)
+      }
+    },
+  })
   stdout.columns = 100
   stdout.rows = 30
   stdout.isTTY = true
@@ -40,12 +53,21 @@ function makeStreams() {
 
 const submitted = []
 const steered = []
+const commands = []
+let commandHandled = true
 const channel = {
   mode: { id: 'default', plan: false },
   modeIndex: 0,
   cycleMode() {},
-  commandList: [],
-  commandCompletions: () => [],
+  commandList: [
+    { name: 'skills', description: 'List available skills' },
+    { name: 'model', description: 'Show the active model' },
+  ],
+  commandCompletions(input) {
+    if (input !== '/skills' && input !== '/model') return []
+    const name = input.slice(1)
+    return [{ name, description: name, commandLine: input, replacement: `${input} ` }]
+  },
   notifications: [],
   pending: [],
   working: false,
@@ -58,13 +80,14 @@ const channel = {
   listFiles: async () => [],
 }
 
-const { stdout, stderr, stdin } = makeStreams()
+const term = new XTerm({ cols: 100, rows: 30, scrollback: 100, allowProposedApi: true })
+const { stdout, stderr, stdin } = makeStreams(term)
 const instance = await render(
   React.createElement(PromptInput, {
     channel,
     helpOpen: false,
     onToggleHelp() {},
-    onRunCommand: () => false,
+    onRunCommand(name) { commands.push(name); return commandHandled },
     selectionActive: false,
   }),
   { stdout, stderr, stdin, exitOnCtrlC: false, patchConsole: false },
@@ -111,12 +134,79 @@ check(
   JSON.stringify(steered),
 )
 
+// A command and Enter can arrive as win32-input-mode records in one stdin
+// read. React has not repainted the completion overlay yet, so PromptInput
+// must use the synchronous value mirror to keep safe live commands local.
+const win32Record = (virtualKey, scanCode, codePoint) =>
+  `\x1b[${virtualKey};${scanCode};${codePoint};1;0;1_`
+const batchedCommand = (letters) => [
+  win32Record(191, 53, 47),
+  ...letters.map(([virtualKey, scanCode, codePoint]) =>
+    win32Record(virtualKey, scanCode, codePoint)),
+  win32Record(13, 28, 13),
+].join('')
+
+// Keep separate physical Enter presses outside PromptInput's 80ms CR/LF
+// dedupe window; each command itself still arrives as one atomic batch.
+await sleep(100)
+stdin.write(batchedCommand([
+  [83, 31, 115],
+  [75, 37, 107],
+  [73, 23, 105],
+  [76, 38, 108],
+  [76, 38, 108],
+  [83, 31, 115],
+]))
+
+check(
+  'batched /skills while streaming executes locally before the overlay repaints',
+  await settled(() => commands.length === 1 && commands[0] === 'skills' && steered.length === 1),
+  `commands=${JSON.stringify(commands)} steered=${JSON.stringify(steered)}`,
+)
+
+await sleep(100)
+stdin.write(batchedCommand([
+  [77, 50, 109],
+  [79, 24, 111],
+  [68, 32, 100],
+  [69, 18, 101],
+  [76, 38, 108],
+]))
+
+check(
+  'batched idle-only commands keep the existing steer behavior while streaming',
+  await settled(() => commands.length === 1 && steered.length === 2 && steered[1] === '/model'),
+  `commands=${JSON.stringify(commands)} steered=${JSON.stringify(steered)}`,
+)
+
+// A registered local command may decline handling and explicitly ask the
+// input component to send the original text to the model instead.
+await sleep(100)
+commandHandled = false
+stdin.write(batchedCommand([
+  [83, 31, 115],
+  [75, 37, 107],
+  [73, 23, 105],
+  [76, 38, 108],
+  [76, 38, 108],
+  [83, 31, 115],
+]))
+
+check(
+  'declined /skills falls back to steer while streaming',
+  await settled(() => commands.length === 2 && commands[1] === 'skills'
+    && steered.length === 3 && steered[2] === '/skills'),
+  `commands=${JSON.stringify(commands)} steered=${JSON.stringify(steered)}`,
+)
+
 // Terminals that cannot report modified Enter keys still expose Ctrl+J as a
 // bare LF, while the physical Enter key arrives as CR. Ctrl+J must therefore
 // remain a usable multiline fallback instead of submitting the first line.
 channel.working = false
 const multilineCases = [
-  ['Ctrl+J', '\n', 'ctrl'],
+  ['Ctrl+J (legacy LF)', '\n', 'ctrl'],
+  ['Ctrl+J (CSI-u)', '\x1b[106;5u', 'csi-u'],
+  ['Ctrl+J (modifyOtherKeys)', '\x1b[27;5;106~', 'modify-other-keys'],
   ['Option+Enter', '\x1b\r', 'option'],
   ['Shift+Enter', '\x1b[13;2u', 'shift'],
 ]
@@ -137,6 +227,56 @@ for (const [index, [label, newlineKey, prefix]] of multilineCases.entries()) {
     JSON.stringify(submitted),
   )
 }
+
+// Enhanced protocols distinguish extra modifiers that legacy LF cannot carry.
+// Only exact Ctrl+J is the fallback; modified variants stay available to other
+// bindings instead of silently changing the draft.
+const modifiedCtrlJCases = [
+  ['Ctrl+Shift+J', '\x1b[106;6u', 'ctrl-shift'],
+  ['Ctrl+Alt+J', '\x1b[106;7u', 'ctrl-alt'],
+  ['Ctrl+Super+J', '\x1b[106;13u', 'ctrl-super'],
+]
+for (const [index, [label, newlineKey, prefix]] of modifiedCtrlJCases.entries()) {
+  stdin.write(`${prefix} first`)
+  await sleep(100)
+  stdin.write(newlineKey)
+  await sleep(100)
+  stdin.write(`${prefix} second`)
+  await sleep(100)
+  stdin.write('\r')
+
+  const submission = multilineCases.length + index + 2
+  check(
+    `${label} does not insert a Ctrl+J fallback newline`,
+    await settled(() => submitted.length === submission + 1
+      && submitted[submission] === `${prefix} first${prefix} second`),
+    JSON.stringify(submitted),
+  )
+}
+
+stdin.write('a')
+await sleep(100)
+stdin.write('\x1b\r')
+await sleep(100)
+stdin.write('\x1b\r')
+await sleep(100)
+stdin.write('b')
+check(
+  'consecutive Option+Enter keeps both blank prompt lines visible',
+  await settled(() => {
+    const lines = viewportLines(term)
+    const top = lines.findIndex(line => line.includes('╭'))
+    const bottom = lines.findIndex((line, index) => index > top && line.includes('╰'))
+    return top >= 0 && bottom - top === 4 && lines.some(line => line.includes('b'))
+  }),
+  viewportLines(term).join('\n'),
+)
+stdin.write('\r')
+check(
+  'consecutive Option+Enter submits both newlines',
+  await settled(() => submitted.at(-1) === 'a\n\nb'),
+  JSON.stringify(submitted),
+)
 
 instance.unmount()
 

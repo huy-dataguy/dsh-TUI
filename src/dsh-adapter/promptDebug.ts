@@ -13,6 +13,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { isAgentLoopRequest, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { snapshotLiveSessionEvents } from './compat/liveSession.js'
+import { t } from '../i18n.js'
 
 export const PROMPT_DEBUG_FILENAME = '.dsh-prompt-debug.json'
 
@@ -50,23 +52,27 @@ interface AgentRegistryLike {
 }
 
 function latestPosition(agent: Agent): { turn: number; step: number } | undefined {
-  for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-    const event = agent.session.events[index]
+  const events = snapshotLiveSessionEvents(agent.session)
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
     if (event?.type === 'step/start') return event.data
   }
   return undefined
 }
 
 function latestRequestHeaderReason(agent: Agent): string | undefined {
-  for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-    const event = agent.session.events[index]
+  const events = snapshotLiveSessionEvents(agent.session)
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
     if (event?.type === 'request/header') return event.data.reason
   }
   return undefined
 }
 
 function turnCompleted(agent: Agent, turn: number): boolean {
-  return agent.session.events.some(event => event.type === 'turn/end' && event.data.turn === turn)
+  return snapshotLiveSessionEvents(agent.session).some(
+    event => event.type === 'turn/end' && event.data.turn === turn,
+  )
 }
 
 function captureRequest(
@@ -202,7 +208,9 @@ export function registerPromptDebug(ctx: Context): void {
 
       return {
         kind: 'success',
-        text: `Wrote ${capture.requests.length} final LLM request${capture.requests.length === 1 ? '' : 's'} to ${output}. The file contains sensitive conversation and prompt data.`,
+        // Localized copy carries the synced/shared-workspace cleanup reminder
+        // (the snapshot lands in the workspace root, 0600); see i18n.ts.
+        text: t('prompt-debug-saved', { count: capture.requests.length, file: output }),
       }
     },
   }))

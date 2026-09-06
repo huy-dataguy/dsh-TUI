@@ -26,6 +26,9 @@ export interface LocalCommand {
   tag?: string
   /** True when a DSH plugin registered this command (not built in). */
   external?: boolean
+  /** True when this command explicitly accepts composer images. Local
+   * commands default to false; registry entries mirror `input.images`. */
+  acceptsImages?: boolean
   /**
    * True when the entry is a user-invocable skill discovered by the DSH
    * skill registry (issue #86). Skill entries are completion-only: dispatch
@@ -57,6 +60,15 @@ export interface CommandCompletion extends LocalCommand {
 export type CommandChildren = (canonicalPath: readonly string[]) => readonly CommandCompletionNode[]
 
 /**
+ * Whether a value can occupy one command-completion token. Keep this aligned
+ * with the grammar accepted by {@link completeCommands}; callers that need an
+ * empty prefix handle that case separately.
+ */
+export function isCommandCompletionToken(value: string): boolean {
+  return /^[a-z0-9_.:\/-]+$/iu.test(value)
+}
+
+/**
  * The built-in slash commands (name + description pairs). Plugin-registered
  * commands merge in at runtime; locals win on name collisions.
  */
@@ -74,6 +86,9 @@ export const LOCAL_COMMANDS: LocalCommand[] = [
   { name: 'export', description: 'Export the conversation to a markdown file' },
   { name: 'btw', description: 'Ask a quick side question without interrupting the conversation' },
   { name: 'trace', description: 'Show the session event trace timeline' },
+  { name: 'agentview', description: 'Open the agent view (all sessions)' },
+  { name: 'bg', description: 'Background this session and open agent view' },
+  { name: 'background', description: 'Background this session and open agent view', tag: 'alias of /bg' },
   // Session / environment
   { name: 'context', description: 'Show loaded context details' },
   { name: 'status', description: 'Show session status' },
@@ -84,6 +99,7 @@ export const LOCAL_COMMANDS: LocalCommand[] = [
   { name: 'doctor', description: 'Run environment checks' },
   { name: 'init', description: 'Create AGENTS.md in the working directory' },
   { name: 'agents', description: 'Show subagents of this session' },
+  { name: 'jobs', description: 'Show background jobs of this session' },
   // Model / display
   { name: 'activity', description: 'Switch the working-activity indicator preset' },
   { name: 'preset', description: 'Switch the agent preset (including Liangshen mode)' },
@@ -96,7 +112,7 @@ export const LOCAL_COMMANDS: LocalCommand[] = [
   { name: 'tokens', description: 'Show session token usage' },
   // Account / policy
   { name: 'balance', description: 'Show DeepSeek account balance' },
-  { name: 'provider', description: 'Add an LLM provider (catalog or custom API endpoint)' },
+  { name: 'provider', description: 'Add, edit or delete an LLM provider (catalog or custom API endpoint)' },
   { name: 'login', description: 'Show API credential status' },
   { name: 'logout', description: 'Clear the API credential' },
   { name: 'add-dir', description: 'Show the filesystem policy scope' },
@@ -105,12 +121,8 @@ export const LOCAL_COMMANDS: LocalCommand[] = [
   { name: 'skills', description: 'List available skills' },
   { name: 'plugins', description: 'Show plugin contract, grant, and ledger diagnostics' },
   { name: 'update', description: 'Update dsh-tui and restart' },
-  // Built-in skills (audit/review/pr-comments/…) are NOT listed here: their
-  // packaged SKILL.md files register through the DSH skill registry, and
-  // refreshSkillCommands publishes each as a real command whose handler
-  // injects the body host-side (#86/#496). A local entry of the same name
-  // would win the collision filter and lock the skill onto the legacy
-  // "activation prompt" path forever.
+  // Skills are discovered through the DSH registry and added at runtime.
+  // A local entry of the same name would win the collision filter.
   // Misc / not applicable on this leaf
   { name: 'vim', description: 'Toggle vim mode' },
   { name: 'terminal-setup', description: 'Show terminal setup instructions' },
@@ -231,7 +243,7 @@ export function completeCommands(
   // Token charset includes `. : /` so provider/model specs (e.g.
   // `deepseek/deepseek-v4-flash`, `openai/gpt-4.1`) survive as ONE token —
   // the /model completion matches its candidates against the whole spec.
-  if (!/^[a-z0-9_.:\/-]*(?:[\t ]+[a-z0-9_.:\/-]*)*$/iu.test(body)) return []
+  if (!body.split(/[\t ]+/u).every(token => token === '' || isCommandCompletionToken(token))) return []
   const trailingSeparator = /[\t ]$/u.test(body)
   const tokens = body.split(/[\t ]+/u)
   const prefix = trailingSeparator ? '' : (tokens.pop() ?? '')
@@ -249,7 +261,7 @@ export function completeCommands(
   const normalizedPrefix = prefix.toLowerCase()
   return candidates.flatMap(candidate => {
     const completionToken = matchingCompletionToken(candidate, normalizedPrefix)
-    if (completionToken === undefined) return []
+    if (completionToken === undefined || !isCommandCompletionToken(completionToken)) return []
     const path = [...tokens, completionToken]
     const commandLine = `/${path.join(' ')}`
     return [{

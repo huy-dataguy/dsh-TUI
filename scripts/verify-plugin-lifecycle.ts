@@ -10,6 +10,7 @@ import { TuiDialogRuntime, getHostDialogStore } from '../src/dsh-adapter/dialogs
 import { TuiStatusRuntime, getHostStatusStore } from '../src/dsh-adapter/status.js'
 import TuiShortcutRuntime, { getHostShortcuts } from '../src/dsh-adapter/shortcuts.js'
 import { TuiRendererRuntime, getHostRenderers } from '../src/dsh-adapter/renderers.js'
+import TuiThemeRuntime, { getHostThemes } from '../src/dsh-adapter/themes.js'
 import TuiSceneRuntime, { getHostSceneRuntime } from '../src/dsh-adapter/scenes.js'
 import TuiSettingsSectionsRuntime, { getHostSettingsSections } from '../src/dsh-adapter/settings-sections.js'
 import TuiWorkspaceRuntime, { getHostWorkspaceRuntime } from '../src/dsh-adapter/workspaces.js'
@@ -28,6 +29,7 @@ await root.plugin(TuiDialogRuntime)
 await root.plugin(TuiStatusRuntime)
 await root.plugin(TuiShortcutRuntime)
 await root.plugin(TuiRendererRuntime)
+await root.plugin(TuiThemeRuntime)
 await root.plugin(TuiSceneRuntime)
 await root.plugin(TuiSettingsSectionsRuntime)
 await root.plugin(TuiWorkspaceRuntime)
@@ -37,11 +39,12 @@ const dialogs = getHostDialogStore(root.get('tuiDialogs'))
 const status = getHostStatusStore(root.get('tuiStatus'))
 const shortcuts = getHostShortcuts(root.get('tuiShortcuts'))
 const renderers = getHostRenderers(root.get('tuiRenderers'))
+const themes = getHostThemes(root.get('tuiThemes'))
 const scenes = getHostSceneRuntime(root.get('tuiScenes'))
 const sections = getHostSettingsSections(root.get('tuiSettingsSections'))
 const workspaces = getHostWorkspaceRuntime(root.get('tuiWorkspaces'))
 const commandTrees = getHostCommandTrees(root.get('tuiCommandTrees'))
-if (dialogs === undefined || status === undefined || shortcuts === undefined || renderers === undefined || scenes === undefined || sections === undefined || workspaces === undefined || commandTrees === undefined) {
+if (dialogs === undefined || status === undefined || shortcuts === undefined || renderers === undefined || themes === undefined || scenes === undefined || sections === undefined || workspaces === undefined || commandTrees === undefined) {
   throw new Error('lifecycle battery could not resolve host accessors')
 }
 
@@ -55,6 +58,7 @@ let rootChildRejected = false
 let rootRegistryRejected = false
 let rootDialog: Promise<boolean> | undefined
 let retainedStatus: any
+let retainedThemes: any
 let retainedWorkspace: any
 let foreignWorkspaceCommands: readonly { name: string }[] | undefined
 let foreignWorkspaceRun: Promise<unknown> | undefined
@@ -63,12 +67,14 @@ let foreignTreeDescription: unknown
 let foreignSceneOpened = false
 let foreignSceneActive: unknown
 const rootProbe = root.inject(
-  ['tuiDialogs', 'tuiStatus', 'tuiShortcuts', 'tuiRenderers', 'tuiScenes', 'tuiSettingsSections', 'tuiWorkspaces', 'tuiCommandTrees'],
+  ['tuiDialogs', 'tuiStatus', 'tuiShortcuts', 'tuiRenderers', 'tuiThemes', 'tuiScenes', 'tuiSettingsSections', 'tuiWorkspaces', 'tuiCommandTrees'],
   (pluginCtx) => {
     const rootCtx = pluginCtx.root
     rootCtx.get('tuiStatus')?.set('root-leak', 'must not persist')
+    rootCtx.get('tuiStatus')?.registerView({ key: 'root-view-leak', component: () => null })
     rootCtx.get('tuiShortcuts')?.register('alt+z', { description: 'root leak', handler: () => {} })
     rootCtx.get('tuiRenderers')?.register('root/leak', () => ({ lines: ['must not persist'] }))
+    rootCtx.get('tuiThemes')?.register({ name: 'root:leak', base: 'dark' })
     const canonicalRoot = rootCtx.root
     const rootBoundStatus = rootCtx.get('tuiStatus')
     rootCtx.root = new Context()
@@ -117,8 +123,10 @@ const rootProbe = root.inject(
 )
 await rootProbe
 check('root status call leaves no contribution', status.getSnapshot().length === 0)
+check('root rich-status call leaves no contribution', status.getViewSnapshot().length === 0)
 check('root shortcut call leaves no binding', shortcuts.dispatch('z', { meta: true }) === false)
 check('root renderer call leaves no renderer', renderers.render('root/leak', {}) === undefined)
+check('root theme call leaves no contribution', themes.getSnapshot().length === 0 && themes.resolve('root:leak') === undefined)
 check('root dialog call leaves no queue entry', dialogs.getSnapshot() === null && (await rootDialog) === false)
 check('root scene registration is rejected', rootSceneRejected)
 check('root settings registration is rejected', rootSettingsRejected)
@@ -149,6 +157,7 @@ const foreignFiber = foreignRoot.plugin({
     }
     const trace = (name: string): any => foreignCtx.reflect.trace(root.get(name))
     trace('tuiStatus')?.set('foreign-leak', 'must not persist')
+    trace('tuiStatus')?.registerView({ key: 'foreign-view-leak', component: () => null })
     trace('tuiShortcuts')?.register('alt+y', { description: 'foreign leak', handler: () => {} })
     trace('tuiRenderers')?.register('foreign/leak', () => ({ lines: ['must not persist'] }))
     foreignDialog = trace('tuiDialogs')?.confirm({ title: 'must not queue' })
@@ -187,6 +196,7 @@ check('cross-composition workspace registration is rejected', foreignWorkspaceRe
 check('cross-composition command-tree registration is rejected', foreignTreeRejected)
 check('cross-composition proxy cannot leave UI effects',
   status.getSnapshot().length === 0
+  && status.getViewSnapshot().length === 0
   && shortcuts.dispatch('y', { meta: true }) === false
   && renderers.render('foreign/leak', {}) === undefined
   && dialogs.getSnapshot() === null
@@ -196,13 +206,16 @@ await foreignRoot.fiber.dispose()
 
 let pluginDialog: Promise<boolean> | undefined
 const pluginFiber = root.inject(
-  ['tuiDialogs', 'tuiStatus', 'tuiShortcuts', 'tuiRenderers', 'tuiScenes', 'tuiSettingsSections', 'tuiWorkspaces', 'tuiCommandTrees'],
+  ['tuiDialogs', 'tuiStatus', 'tuiShortcuts', 'tuiRenderers', 'tuiThemes', 'tuiScenes', 'tuiSettingsSections', 'tuiWorkspaces', 'tuiCommandTrees'],
   (pluginCtx) => {
     retainedStatus = pluginCtx.get('tuiStatus')
+    retainedThemes = pluginCtx.get('tuiThemes')
     retainedWorkspace = pluginCtx.get('tuiWorkspaces')
     pluginCtx.tuiStatus.set('lifecycle', 'active')
+    pluginCtx.tuiStatus.registerView({ key: 'lifecycle-view', maxRows: 2, component: () => null })
     pluginCtx.tuiShortcuts.register('alt+x', { description: 'lifecycle', handler: () => {} })
     pluginCtx.tuiRenderers.register('lifecycle/note', () => ({ lines: ['active'] }))
+    pluginCtx.tuiThemes.register({ name: 'lifecycle:theme', base: 'dark', colors: { claude: '#123456' } })
     pluginCtx.tuiScenes.register({ id: 'lifecycle', component: () => null })
     pluginCtx.tuiScenes.open('lifecycle')
     pluginCtx.tuiSettingsSections.register({ ns: 'lifecycle', title: 'Lifecycle', fields: [] })
@@ -220,10 +233,13 @@ const pluginFiber = root.inject(
 await pluginFiber
 check('live plugin effects are visible before dispose',
   status.getSnapshot().some(entry => entry.key === 'lifecycle')
+  && status.getViewSnapshot().some(entry => entry.key === 'lifecycle-view' && entry.maxRows === 2)
   && scenes.active?.id === 'lifecycle'
   && sections.list().some(section => section.ns === 'lifecycle')
   && shortcuts.dispatch('x', { meta: true })
   && renderers.render('lifecycle/note', {})?.lines[0] === 'active'
+  && themes.resolve('lifecycle:theme')?.claude === '#123456'
+  && themes.getSnapshot().some(entry => entry.name === 'lifecycle:theme')
   && workspaces.commands().some(command => command.name === 'lifecycle') === true
   && commandTrees.children(['lifecycle']).length === 1
   && dialogs.getSnapshot()?.kind === 'confirm')
@@ -264,21 +280,29 @@ await foreignSceneFiber.dispose()
 
 const foreignStatusFiber = root.inject(['tuiStatus'], (pluginCtx) => {
   pluginCtx.tuiStatus.set('lifecycle', 'foreign')
+  pluginCtx.tuiStatus.registerView({ key: 'lifecycle-view', component: () => null })
 })
 await foreignStatusFiber
 check('foreign plugin cannot overwrite another activation status',
   status.getSnapshot().find(entry => entry.key === 'lifecycle')?.text === 'active')
+check('foreign plugin cannot overwrite another activation rich status',
+  status.getViewSnapshot().find(entry => entry.key === 'lifecycle-view')?.maxRows === 2)
 await foreignStatusFiber.dispose()
 
 await pluginFiber.dispose()
 check('plugin dialog is cancelled on its fiber dispose', (await pluginDialog) === false)
 retainedStatus?.set('retained-after-dispose', 'must not persist')
+retainedThemes?.register({ name: 'retained:theme', base: 'dark' })
 check('fiber dispose releases every registered extension effect',
   status.getSnapshot().length === 0
+  && status.getViewSnapshot().length === 0
   && scenes.active === undefined
   && sections.list().length === 0
   && shortcuts.dispatch('x', { meta: true }) === false
   && renderers.render('lifecycle/note', {}) === undefined
+  && themes.getSnapshot().length === 0
+  && themes.resolve('lifecycle:theme') === undefined
+  && themes.resolve('retained:theme') === undefined
   && workspaces.commands().some(command => command.name === 'lifecycle') === false
   && commandTrees.children(['lifecycle']).length === 0
   && dialogs.getSnapshot() === null)
@@ -313,6 +337,7 @@ const forgedFiber = root.inject(
     const fakeFiber = { uid: 999, state: 2, runtime: null, ctx: root, effect: (execute: () => unknown) => execute() }
     const forged = pluginCtx.extend({ fiber: fakeFiber })
     forged.get('tuiStatus')?.set('forged', 'must not persist')
+    forged.get('tuiStatus')?.registerView({ key: 'forged-view', component: () => null })
     forged.get('tuiShortcuts')?.register('alt+f', { description: 'forged', handler: () => {} })
     forged.get('tuiRenderers')?.register('forged/leak', () => ({ lines: ['must not persist'] }))
     forgedDialog = forged.get('tuiDialogs')?.confirm({ title: 'must not queue' })
@@ -340,6 +365,7 @@ const forgedFiber = root.inject(
 )
 await forgedFiber
 check('forged caller leaves no status', status.getSnapshot().length === 0)
+check('forged caller leaves no rich status', status.getViewSnapshot().length === 0)
 check('forged caller leaves no shortcut', shortcuts.dispatch('f', { alt: true, meta: true }) === false)
 check('forged caller leaves no renderer', renderers.render('forged/leak', {}) === undefined)
 check('forged caller leaves no dialog', dialogs.getSnapshot() === null && (await forgedDialog) === false)

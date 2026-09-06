@@ -9,7 +9,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { SessionModeSpec } from '../sessionModes.js'
-import { DEFAULT_STATUS_BAR, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import { DEFAULT_STATUS_BAR, normalizePageMargin, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import { SHORTCUT_ACTIONS, type ShortcutActionId } from '../utils/keymap.js'
 
 export const name = 'dsh-tui'
@@ -71,10 +71,14 @@ export interface Config {
    *  installs start there; cordis.yml `fullscreen: false` or a /settings
    *  toggle opts back into the inline main-screen layout. */
   fullscreen?: boolean
+  /** Allow terminal image previews when supported (default true). Saved
+   *  /settings choices override this value after restart. The environment
+   *  override DSH_TUI_DISABLE_TERMINAL_IMAGES can always force previews off. */
+  terminalImages?: boolean
   /** UI language: `en` / `zh`. When absent, the `DSH_TUI_LANG` env var wins,
    *  then the `/lang` choice persisted in `~/.dsh-tui/lang.json`, then `zh`. */
   lang?: string
-  /** Agent preset id new sessions compose from (standard/code/minimal/
+  /** Agent preset id new sessions compose from (standard/ptc/minimal/
    *  cordis/… when the roster is mounted). When absent, the `/preset` choice
    *  persisted in `~/.dsh-tui/agent-preset.json` wins, then the roster
    *  default (`standard`). */
@@ -93,6 +97,12 @@ export interface Config {
    *  `dsh-tui.scrollGutter`): `timeline` turn rail (default), `scrollbar`
    *  proportional thumb, or `hidden`. */
   scrollGutter?: ScrollGutterMode
+  /** Root page inset (settings `dsh-tui.pageMargin`): a preset name
+   *  (`none` / `slim` / `normal` (default) / `roomy`) or a custom `NxM`
+   *  spec (columns per side × rows top/bottom) that insets the whole UI
+   *  from the terminal edges. Terminals without their own viewport padding
+   *  (bare WSL, tmux, SSH) otherwise hug the screen border. */
+  pageMargin?: PageMarginSetting
   /** Terminal-card header folding (settings `dsh-tui.foldTerminalCommand`):
    *  `true` collapses a multi-line command title to its first line plus a
    *  `+N lines` hint; Ctrl+O / clicking the card expands it. Default off —
@@ -101,6 +111,16 @@ export interface Config {
   /** Show the session name as a chip on the prompt top border's right side
    *  (settings `dsh-tui.promptSessionLabel`); off by default. */
   promptSessionLabel?: boolean
+  /** Fullscreen draft editor (settings `dsh-tui.expandEditor`): the ⛶
+   *  affordance in the input row and the expandEditor shortcut (default
+   *  Ctrl+Shift+E) expand the draft into a whole-screen editor. On by
+   *  default; off removes both entry points. */
+  expandEditor?: boolean
+  /** Smooth streaming reveal (settings `dsh-tui.smoothStreaming`): live
+   *  assistant text, expanded thinking, and tool call bodies paint through
+   *  a ~30fps reveal instead of jumping per provider burst — bursty or
+   *  one-shot deliveries read as an even flow. On by default. */
+  smoothStreaming?: boolean
   /** Status-footer field visibility and compact presentation preferences. */
   statusBar?: Partial<StatusBarConfig>
   /** Built-in action-shortcut overrides (`paste: 'alt+v'`), keyed by action
@@ -131,14 +151,24 @@ export const Config: Schema<Config> = Schema.object({
   activityFrames: Schema.string().required(false),
   contextBar: Schema.boolean().default(true),
   fullscreen: Schema.boolean().default(true),
+  terminalImages: Schema.boolean().default(true),
   lang: Schema.string().required(false),
   preset: Schema.string().required(false),
   diffLayout: Schema.union(['auto', 'split', 'unified']).default('auto'),
   thinkingFold: Schema.union(['preview', 'full']).default('preview'),
   toolBackground: Schema.union(['none', 'subtle', 'strong']).default('none'),
   scrollGutter: Schema.union(['timeline', 'scrollbar', 'hidden']).default('timeline'),
+  // Preset names AND custom `NxM` specs must survive validation (a custom
+  // spec is not a fixed union member); junk is normalized to `normal` by
+  // the transform, so every parsed config carries a valid setting.
+  pageMargin: Schema.transform(
+    Schema.string().default('normal'),
+    value => normalizePageMargin(value),
+  ),
   foldTerminalCommand: Schema.boolean().default(false),
   promptSessionLabel: Schema.boolean().default(false),
+  expandEditor: Schema.boolean().default(true),
+  smoothStreaming: Schema.boolean().default(true),
   statusBar: Schema.object({
     compact: Schema.boolean().default(DEFAULT_STATUS_BAR.compact),
     model: Schema.boolean().default(DEFAULT_STATUS_BAR.model),
@@ -170,6 +200,7 @@ export const Config: Schema<Config> = Schema.object({
       plan: Schema.boolean().required(false),
       sandbox: Schema.union(['read-only', 'workspace-write', 'danger-full-access']).required(false),
       approval: Schema.union(['ask', 'never']).required(false),
+      permission: Schema.string().required(false),
     }),
   ).required(false),
 })

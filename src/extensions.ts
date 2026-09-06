@@ -3,7 +3,9 @@
 // Plugin authors import the seam types from here
 // (`@deepseek-harness-tui/dsh-tui/extensions`); importing the module also
 // applies the `declare module '@deepseek-ai/cordis'` augmentation for the
-// decision events and the four service properties on Context.
+// decision events and the five service properties on Context. In particular,
+// `tuiStatus.registerView()` returns `undefined` when the host refuses a rich
+// registration, or a cleanup-aware disposer when it admits one.
 export * from './dsh-adapter/extensions.js'
 // Decision dispatch is a host/channel operation.  Export only the event
 // vocabulary and safe normalizers; dispatching an arbitrary payload through
@@ -46,11 +48,29 @@ export type {
   TuiDialogSnapshot,
 } from './dsh-adapter/dialogs.js'
 export { TuiStatusRuntime, TuiStatusStore } from './dsh-adapter/status.js'
-export type { TuiStatusEntry } from './dsh-adapter/status.js'
+export type {
+  TuiStatusEntry,
+  TuiStatusViewDescriptor,
+  TuiStatusViewDisposer,
+  TuiStatusViewMaxRows,
+  TuiStatusViewProps,
+  TuiStatusViewUi,
+} from './dsh-adapter/status.js'
+export type { TerminalImageSource } from './ink/terminal-image.js'
 export { matchShortcut, parseShortcutCombo, TuiShortcutRuntime } from './dsh-adapter/shortcuts.js'
 export type { TuiShortcutKey, TuiShortcutOptions } from './dsh-adapter/shortcuts.js'
 export { TuiRendererRuntime } from './dsh-adapter/renderers.js'
 export type { TuiEntryRenderer, TuiEntryRenderResult } from './dsh-adapter/renderers.js'
+export { TuiToastRuntime } from './dsh-adapter/toast.js'
+export type { TuiToastDelivery, TuiToastOptions, TuiToastSink } from './dsh-adapter/toast.js'
+// Runtime themes expose only the registration capability. The host snapshot,
+// resolver and subscription accessor stay behind the adapter boundary.
+export { TuiThemeRuntime } from './dsh-adapter/themes.js'
+export type {
+  TuiThemeBase,
+  TuiThemeDescriptor,
+  TuiThemeRegistration,
+} from './dsh-adapter/themes.js'
 // The D-7 permission vocabulary (which grant each decision event needs) is
 // part of the plugin-facing contract too.
 export { DECISION_EVENT_PERMISSIONS } from './dsh-adapter/decision-guard.js'

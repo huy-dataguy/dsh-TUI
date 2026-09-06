@@ -5,30 +5,33 @@ import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import * as toolAskUser from '@deepseek-ai/dsh-tool-ask-user'
 import type { Context } from '@deepseek-ai/cordis'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import Schema from '@deepseek-ai/schemastery'
 import { Config } from './index.js'
 import { createChannel } from './channel.js'
 import { createChildStderrReporter, installChildStderrGuard } from './childStderr.js'
+import { removeClipboardImageDir } from '../utils/clipboard.js'
 import { logForDebugging } from '../utils/debug.js'
+import { isEnvTruthy } from '../utils/envUtils.js'
 import { QuestionStore } from './questions.js'
+import { prepareQuestionAnswerer } from './questions-answerer.js'
 import { ApprovalStore } from './approvals.js'
-import { registerPackagedSkills } from './packaged-skills.js'
 import { registerPromptDebug } from './promptDebug.js'
 import { readActivityFrames } from '../activityPrefs.js'
 import { commitFullscreenFactoryMigration, planFullscreenFactoryMigration, readAppliedMigrations } from '../migrationPrefs.js'
 import { readModelPref } from '../modelPrefs.js'
 import { explicitModelRoute, recordedModelRoute, resolveModelRoute, validateModelRoute } from '../modelRoute.js'
 import type { ModelRoute } from '../modelRoute.js'
-import { readPresetPref } from '../presetPrefs.js'
+import { migratePresetPref, readPresetPref } from '../presetPrefs.js'
+import { readEffortPref } from '../effortPrefs.js'
 import { composePreset, filterMinimalPresetTools, resolvePersistedPreset, resolvePersistedRoute, runningPresetOf } from './presets.js'
 import { ensurePackagedPresets } from './packaged-presets.js'
-import { ensureLegacySessionEventTypes } from './compat/index.js'
+import { ensureLegacySessionEventTypes, snapshotLiveSessionEvents } from './compat/index.js'
 import { clearResumeTarget, resumeTargetFromArgv, writeResumeTarget } from '../sessionHistory.js'
 import { resolveSessionCwd } from '../utils/workspaceRoot.js'
-import { beginRestartAttempt, checkForTuiUpdate, installedTuiVersion, isBootDeadlockTarget, isVersionNewer, logRestartEvent, resolveDshProfileName, resolveTuiUpdateTarget, restartTui, updateTuiAndRestart, writeHandoffNotice } from '../update.js'
+import { beginRestartAttempt, checkForTuiUpdate, installedTuiVersion, isBootDeadlockTarget, isStandaloneRuntime, isVersionNewer, logRestartEvent, resolveDshProfileName, resolveTuiUpdateTarget, restartTui, updateTuiAndRestart, writeHandoffNotice } from '../update.js'
 import { getLang, isLang, resolveStartupLang, setLang, t, writeLangPref } from '../i18n.js'
-import { DEFAULT_STATUS_BAR, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import { DEFAULT_PAGE_MARGIN, DEFAULT_STATUS_BAR, applyPageMargin, isPageMarginMode, normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import {
   draftComboConflicts,
   effectiveComboString,
@@ -41,14 +44,18 @@ import { detectLegacyEnv, migrateLegacyDataDir, RENAMED_ENV } from '../utils/pat
 import { attachHerdrIntegration } from '../herdr.js'
 import { logMouseDebug } from '../utils/debug.js'
 import { Chat } from '../screens/Chat.js'
+import { openInjectChannel, type InjectController } from './inject-channel.js'
 import { getHostDialogStore, type TuiDialogRuntime } from './dialogs.js'
 import { getHostStatusStore, type TuiStatusRuntime } from './status.js'
+import { getHostToastStore, type TuiToastRuntime } from './toast.js'
 import { getHostShortcuts, type TuiShortcutRuntime } from './shortcuts.js'
+import { getHostThemes, type TuiThemeRuntime } from './themes.js'
 import { attachSessionToWorkspace } from './workspace.js'
 import { createLocalWorkspaceRuntime, getHostWorkspaceRuntime } from './workspaces.js'
 import { getHostSettingsSections, getLocalSettingsSectionsHost, type TuiSettingsField, type TuiSettingsSectionsRuntime } from './settings-sections.js'
 import { withHostRootCapability } from './host-access.js'
 import { render, ThemeProvider, AlternateScreen } from '../ui.js'
+import { PageMargin } from '../components/PageMargin.js'
 import instances from '../ink/instances.js'
 import { cursorMove, DISABLE_KITTY_KEYBOARD, DISABLE_MODIFY_OTHER_KEYS, DISABLE_WIN32_INPUT_MODE } from '../ink/termio/csi.js'
 import { DBP, DFE, DISABLE_MOUSE_TRACKING, EXIT_ALT_SCREEN, SHOW_CURSOR } from '../ink/termio/dec.js'
@@ -69,13 +76,64 @@ import { CLEAR_ITERM2_PROGRESS, CLEAR_TAB_STATUS, supportsTabStatus, wrapForMult
  * apply() re-resolves `bootedFullscreen` from cordis config, and the
  * settings user layer (settings.yaml) can arrive after the 300ms
  * `settingsReady` bound when the recompose is also re-mounting the settings
- * service. The tree would then mount INLINE and `fullscreenFrozen` would
+ * service. The tree would then mount INLINE and `rendererSettingsFrozen` would
  * swallow the late application — the app lands on the main screen
  * ("exited fullscreen", dead mouse, unpinned input) until restart. A
  * session that already mounted fullscreen must never regress on a
  * recompose: latch the decision.
  */
 let lastBootedFullscreen: boolean | undefined
+// Image preferences also stay fixed across host recomposes until /restart.
+let lastBootedTerminalImages: boolean | undefined
+
+/**
+ * Extract the startup prompt from raw app argv. `--resume <session>` selects
+ * a persisted session and must not leak its id into the conversation.
+ */
+export function initialPromptFromCmdlineArgs(args: readonly string[] | undefined): string {
+  if (args === undefined) return ''
+  const promptArgs: string[] = []
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!
+    if (arg === '--resume') {
+      if (args[i + 1] !== undefined && !args[i + 1]!.startsWith('-')) i += 1
+      continue
+    }
+    if (arg.startsWith('--resume=')) continue
+    if (arg.startsWith('-')) continue
+    promptArgs.push(arg)
+  }
+  return promptArgs.join(' ').trim()
+}
+
+/**
+ * How this process should treat the TUI frontend, given the terminal it runs on.
+ *
+ * Three startup identities exist:
+ *  1. `dsh-tui` / standalone — the user explicitly asked for the terminal UI;
+ *  2. Web / Tauri / other GUI hosts — the profile merely has dsh-tui installed
+ *     and the current process is NOT a dsh-tui frontend. stdout is a pipe or
+ *     null there, and mounting a TUI would fail the whole composition.
+ *
+ * The official launcher (and the standalone runtime) mark explicit launches,
+ * so an explicit `dsh-tui` run without a TTY keeps failing loudly, while
+ * foreign hosts skip the plugin and let the host boot.
+ */
+export type TuiHostMode = 'interactive' | 'invalid-explicit-launch' | 'headless-host'
+
+export function resolveTuiHostMode(
+  stdoutIsTTY = process.stdout.isTTY === true,
+  env: NodeJS.ProcessEnv = process.env,
+): TuiHostMode {
+  if (stdoutIsTTY) {
+    return 'interactive'
+  }
+
+  const explicitTuiLaunch =
+    env.DSH_TUI_LAUNCHER_VERSION !== undefined || isStandaloneRuntime()
+
+  return explicitTuiLaunch ? 'invalid-explicit-launch' : 'headless-host'
+}
 
 export async function apply(ctx: Context, config: Config): Promise<void> {
   // /restart handoff diagnosis: the replacement process is marked by env and
@@ -133,11 +191,23 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     sampleAt(5000, 'stdin state +5s')
     sampleAt(12000, 'stdin state +12s')
   }
-  if (!process.stdout.isTTY) {
+  const hostMode = resolveTuiHostMode()
+  if (hostMode === 'invalid-explicit-launch') {
     if (process.env.DSH_TUI_RESTART_CHILD === '1') {
       logRestartEvent('boot: TTY gate failed - stdout is not a TTY')
     }
     throw new Error('dsh-tui requires an interactive terminal (stdout must be a TTY).')
+  }
+  if (hostMode === 'headless-host') {
+    // Web / Tauri / GUI hosts load the plugin from the profile without being
+    // a dsh-tui frontend (stdout is a pipe or null). Mounting a TUI there
+    // would fail the whole composition, so skip quietly and let the host
+    // boot. The launcher marker above keeps explicit `dsh-tui` launches
+    // failing loudly instead of silently producing no UI.
+    ctx.logger.info(
+      'dsh-tui: non-interactive host detected (stdout is not a TTY); skipping the TUI frontend',
+    )
+    return
   }
 
   // The official profile launcher owns the system preset root and replaces
@@ -232,14 +302,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
 
   // DSH user-interaction seam: the model's ask_user_question tool parks on
-  // the userInteraction service until a UI provider answers. Mount the
+  // the userQuestions service until a UI answerer responds. Mount the
   // service when the composition doesn't (the official dsh-base
   // user-interaction config row does; a bare plugin mount creates it on
-  // this context), expose the model-facing tool, and register this TUI's
-  // questionnaire as the provider. All three must be in place before the
-  // agent is resolved so the per-step tool assembly includes
-  // ask_user_question. Optional-service access goes through `ctx.get`, not
-  // the inject proxy.
+  // this context), then expose the model-facing tool before resolving the
+  // agent so per-step assembly includes ask_user_question. rc.2's provider
+  // seat is registered below; the 0.1.2 line's agent-aware waterfall needs the
+  // channel owner and is therefore registered immediately after the channel
+  // is created. Optional-service access goes through `ctx.get`, not the
+  // inject proxy.
   const userQuestions = ctx.get('userQuestions') ?? new UserQuestionService(ctx)
   ctx.plugin(toolAskUser)
   // The host-level tool mount above is intentional for the TUI and for user
@@ -253,25 +324,33 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     return filterMinimalPresetTools(assembled, presetId)
   })
   const questionStore = new QuestionStore()
-  // Packaged skills (/audit, /bug, …): contribute them through the host's
-  // skill registry so they resolve with zero manual copying.
-  registerPackagedSkills(ctx)
+  // One store, one teardown effect on both API lines. The compatibility
+  // adapter binds either registration to this Cordis fiber; this separate
+  // effect rejects asks still parked in the UI during teardown.
+  ctx.effect(() => () => questionStore.rejectAll())
   // `/debug-prompt` snapshots the final provider-neutral request at the
   // llm/stream boundary, after every prompt and tool contributor has run.
   registerPromptDebug(ctx)
-  // Yield to an incumbent provider instead of crashing the whole plugin tree
-  // (issue #98): the harness allows exactly ONE user-questions provider per
-  // context, and stacking this TUI onto a profile that already carries
-  // @deepseek-ai/dsh-web-app (its api-gateway registers first) used to fail
-  // the boot with DUPLICATE_PROVIDER. The incumbent UI then owns questionnaire
-  // rendering; this TUI's ask_user_question requests are answered there.
-  try {
-    userQuestions.registerProvider({
-      ask: request => questionStore.ask(request),
-    })
-    ctx.effect(() => () => questionStore.rejectAll())
-  } catch (error) {
-    if ((error as { code?: string }).code !== 'DUPLICATE_PROVIDER') throw error
+  // API selection and registration live behind one adapter boundary. The UI
+  // bootstrap only translates a legacy seat conflict into its visible notice.
+  const questionAnswererRegistration = prepareQuestionAnswerer(ctx, userQuestions, questionStore)
+  const questionSeatDecision = questionAnswererRegistration.kind === 'legacy'
+    ? questionAnswererRegistration.yieldDecision
+    : undefined
+  let questionSeatNotice: string | undefined
+  if (questionSeatDecision?.action === 'alert-unverified') {
+    ctx.logger.error(
+      `dsh-tui: user-questions provider seat is held by a component self-reporting as ${questionSeatDecision.incumbentId} ` +
+        '(identity not host-verified); this TUI will not register its questionnaire and model questions may be answered by it',
+    )
+    questionSeatNotice = t('question-provider-occupied-unverified', { id: questionSeatDecision.incumbentId ?? '' })
+  } else if (questionSeatDecision?.action === 'alert') {
+    const displayId = questionSeatDecision.incumbentId ?? t('question-provider-occupied-unknown')
+    ctx.logger.error(
+      `dsh-tui: user-questions provider seat is held by a non-host component (${displayId}); ` +
+        'this TUI will not register its questionnaire and model questions may be answered by it',
+    )
+    questionSeatNotice = t('question-provider-occupied', { id: displayId })
   }
 
   // Child-process stderr guard (issue #17): MCP servers spawned with an
@@ -354,12 +433,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   // Same skew guard for the plugin-UI services (dsh-tui-extensions row):
   // managed dialogs park unanswered, status contributions never render,
-  // shortcuts never match, and custom-entry renderers stay invisible when
-  // the row is absent — say why on profile launches.
-  if (ctx.get('tuiDialogs') === undefined && resolveDshProfileName() !== undefined) {
+  // shortcuts never match, custom-entry renderers stay invisible, and runtime
+  // themes stay out of the picker when the row is absent — say why on profile
+  // launches. The static JSON theme path remains available without this row.
+  const themeHost = getHostThemes(ctx.get('tuiThemes') as TuiThemeRuntime | undefined)
+  if ((ctx.get('tuiDialogs') === undefined || themeHost === undefined) && resolveDshProfileName() !== undefined) {
     ctx.logger.warn(
-      'dsh-tui: tuiDialogs/tuiStatus/tuiShortcuts/tuiRenderers services are not mounted; plugin dialogs, status contributions, shortcuts and custom-entry renderers are off. ' +
-      'The bundle patch is older than the installed dsh-tui package — update the globally installed dsh-tui launcher to match the profile (issue #183).',
+      'dsh-tui: tuiDialogs/tuiStatus/tuiShortcuts/tuiRenderers/tuiThemes services are not mounted; plugin dialogs, status contributions, shortcuts, custom-entry renderers and runtime themes are off. ' +
+      'Static ~/.dsh-tui/themes JSON remains available. The bundle patch is older than the installed dsh-tui package — update the globally installed dsh-tui launcher to match the profile (issue #183).',
     )
   }
   // Same skew guard for the plugin-host row (dsh-tui-plugin-host): without
@@ -455,20 +536,43 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     thinkingFold: config.thinkingFold,
     toolBackground: config.toolBackground,
     scrollGutter: config.scrollGutter,
+    pageMargin: config.pageMargin,
     foldTerminalCommand: config.foldTerminalCommand,
     promptSessionLabel: config.promptSessionLabel,
+    expandEditor: config.expandEditor,
+    smoothStreaming: config.smoothStreaming,
     statusBar: config.statusBar,
     handle,
   })
+  // Root page-margin store: the PageMargin inset box sits ABOVE Chat, so
+  // the channel version bump (which re-renders everything below Chat)
+  // cannot drive it. Seed the store from config before the tree mounts;
+  // applyDisplay below mirrors every settings change into it live.
+  applyPageMargin(config.pageMargin)
+  // Plugin toasts ride the channel's own notification surface: the runtime
+  // already sanitized/rate-limited the delivery, the sink only forwards.
+  // Without the extensions row (tuiToast absent) plugin toasts are dropped
+  // by the runtime itself — same soft-degrade contract as the other seams.
+  const toastStore = getHostToastStore(ctx.get('tuiToast') as TuiToastRuntime | undefined)
+  toastStore?.setSink(delivery => {
+    channel.notify(delivery.text, { color: delivery.color, timeoutMs: delivery.timeoutMs })
+  })
+  if (questionAnswererRegistration.kind === 'waterfall') {
+    // Ownership follows the mutable channel; registration cleanup belongs to
+    // this Cordis fiber.
+    questionAnswererRegistration.register(channel)
+  }
   // Fullscreen layout decision: the settings user layer (edited through the
   // /settings screen) overrides cordis.yml when set. The settings injection
   // below resolves it synchronously when the host settings service is up —
-  // i.e. before the tree mounts. `fullscreenFrozen` latches at mount: the
+  // i.e. before the tree mounts. `rendererSettingsFrozen` latches at mount: the
   // exit funnel and the AlternateScreen wrap must keep reading the mode this
   // session ACTUALLY runs, never a mid-session edit meant for the next boot
   // (swapping layouts requires re-mounting the whole tree).
   let bootedFullscreen = config.fullscreen === true
-  let fullscreenFrozen = false
+  let bootedTerminalImages = lastBootedTerminalImages ?? config.terminalImages ?? true
+  let rendererSettingsFrozen = false
+  const terminalImagesDisabledByEnv = isEnvTruthy(process.env.DSH_TUI_DISABLE_TERMINAL_IMAGES)
   // The settings service may come up AFTER this plugin's apply: the cordis
   // inject callback defers until the service registers, so the first
   // `apply(scope.get())` below can land after the mount (field report: the
@@ -486,7 +590,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // user layer in settings.yaml wins over cordis.yml's diffLayout, and
   // watch() lands commits on the live channel — no recompose needed.
   ctx.inject(['settings'], (settingsCtx) => {
-    const tuiSettingsNs = settingsNamespace('dsh-tui')
+    // alpha.2 removed the `settingsNamespace()` brand helper: register() now
+    // takes the raw string and validates it itself, while rc.2 still wants the
+    // branded handle. Brands are type-only, so the constant cast compiles
+    // against both lines and the runtime value is identical ('dsh-tui' always
+    // satisfied the namespace pattern).
+    const tuiSettingsNs = 'dsh-tui' as SettingsNamespace
     const scope = settingsCtx.settings.register(
       tuiSettingsNs,
       Schema.object({
@@ -494,6 +603,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         thinkingFold: Schema.union(['preview', 'full']).default('preview'),
         toolBackground: Schema.union(['none', 'subtle', 'strong']).default('none'),
         scrollGutter: Schema.union(['timeline', 'scrollbar', 'hidden']).default('timeline'),
+        // Preset names AND custom `NxM` specs (the settings field's parse
+        // gate keeps junk out of the user layer; the transform normalizes
+        // whatever survives — cordis.yml junk included).
+        pageMargin: Schema.transform(
+          Schema.string().default('normal'),
+          value => normalizePageMargin(value),
+        ),
         // No default on purpose (same rule as `fullscreen` below): a schema
         // default here would come back from scope.get()/watch() and shadow
         // an explicit cordis.yml `foldTerminalCommand: true` while the
@@ -502,6 +618,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         // default and keeps cordis.yml decisive.
         foldTerminalCommand: Schema.boolean(),
         promptSessionLabel: Schema.boolean().default(false),
+        // No schema default (same rule as foldTerminalCommand): applyDisplay
+        // resolves `?? config.expandEditor ?? true` so cordis.yml stays
+        // decisive while the user layer is unset.
+        expandEditor: Schema.boolean(),
+        // Same no-default rule: applyDisplay resolves `?? config.smoothStreaming ?? true`.
+        smoothStreaming: Schema.boolean(),
+        // No default on purpose: unset keeps the boot chain decisive
+        // (applyEffortDefault hands `undefined` to channel.setDefaultEffort,
+        // which resolves cordis.yml `effort` → effort.json → adapter default).
+        effortDefault: Schema.string(),
         statusBar: Schema.object({
           compact: Schema.boolean().default(DEFAULT_STATUS_BAR.compact),
           model: Schema.boolean().default(DEFAULT_STATUS_BAR.model),
@@ -523,6 +649,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         }).default({ ...DEFAULT_STATUS_BAR }),
         // Header pixel whale art; on unless settings.yaml says otherwise.
         whale: Schema.boolean().default(true),
+        // Idle whale behaviors after the intro settles; off by default —
+        // the settled header otherwise holds zero timers (idle-wakeup gate).
+        whaleIdle: Schema.boolean().default(false),
         // Minimal mode: strips the header splash, emoji glyphs, and
         // decorative colors; code highlight and tool colors stay.
         minimal: Schema.boolean().default(false),
@@ -533,6 +662,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         // Same no-default rule: unset keeps cordis.yml's `fullscreen`
         // decisive; set overrides it from the next boot on.
         fullscreen: Schema.boolean(),
+        // Unset inherits cordis.yml; a saved choice takes effect after restart.
+        terminalImages: Schema.boolean(),
         // Built-in action-shortcut overrides, one optional combo string per
         // action (see src/utils/keymap.ts). Unset keeps the default binding
         // and the section's format() shows the effective combos.
@@ -545,13 +676,19 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       diffLayout?: 'auto' | 'split' | 'unified'
       lang?: 'zh' | 'en'
       whale?: boolean
+      whaleIdle?: boolean
       minimal?: boolean
       fullscreen?: boolean
+      terminalImages?: boolean
       thinkingFold?: 'preview' | 'full'
+      effortDefault?: string
       toolBackground?: ToolBackground
       scrollGutter?: ScrollGutterMode
+      pageMargin?: PageMarginSetting
       foldTerminalCommand?: boolean
       promptSessionLabel?: boolean
+      expandEditor?: boolean
+      smoothStreaming?: boolean
       statusBar?: Partial<StatusBarConfig>
       shortcuts?: Partial<Record<ShortcutActionId, string>>
     }
@@ -561,17 +698,20 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     const applyWhale = (value: { whale?: boolean }): void => {
       channel.setWhale(value.whale ?? true)
     }
+    /** Apply the idle-whale-behavior setting: live-toggle the channel flag. */
+    const applyWhaleIdle = (value: { whaleIdle?: boolean }): void => {
+      channel.setWhaleIdle(value.whaleIdle ?? false)
+    }
     const applyMinimal = (value: { minimal?: boolean }): void => {
       channel.setMinimal(value.minimal ?? false)
     }
-    // Fullscreen: only meaningful before the tree mounts (the freeze latch
-    // above). A later doc change (mid-session /settings edit) is persisted
-    // by the service and picked up on the next boot; the watch below says
-    // so with a notify.
-    const applyFullscreen = (value: SettingsValue): void => {
-      if (!fullscreenFrozen && typeof value.fullscreen === 'boolean') {
+    // Renderer settings are resolved before mount; later edits wait for restart.
+    const applyRendererSettings = (value: SettingsValue): void => {
+      if (rendererSettingsFrozen) return
+      if (typeof value.fullscreen === 'boolean') {
         bootedFullscreen = value.fullscreen
       }
+      bootedTerminalImages = lastBootedTerminalImages ?? value.terminalImages ?? config.terminalImages ?? true
     }
     // The /settings language field writes `lang` through the settings
     // service (user layer): apply it live and mirror it to lang.json so
@@ -590,8 +730,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       channel.setThinkingFold(value.thinkingFold ?? config.thinkingFold ?? 'preview')
       channel.setToolBackground(normalizeToolBackground(value.toolBackground ?? config.toolBackground))
       channel.setScrollGutter(normalizeScrollGutter(value.scrollGutter ?? config.scrollGutter))
+      // Page margin: the channel carries the mode (tests observe it), the
+      // module store drives the actual inset box above Chat — keep both in
+      // lockstep so a live /settings edit re-lays out immediately.
+      const pageMargin = normalizePageMargin(value.pageMargin ?? config.pageMargin)
+      channel.setPageMargin(pageMargin)
+      applyPageMargin(pageMargin)
       channel.setFoldTerminalCommand(value.foldTerminalCommand ?? config.foldTerminalCommand ?? false)
       channel.setPromptSessionLabel(value.promptSessionLabel ?? config.promptSessionLabel ?? false)
+      channel.setExpandEditor(value.expandEditor ?? config.expandEditor ?? true)
+      channel.setSmoothStreaming(value.smoothStreaming ?? config.smoothStreaming ?? true)
       channel.setStatusBar(normalizeStatusBar(value.statusBar ?? config.statusBar))
     }
     // Shortcut overrides resolve per action: settings user layer wins over
@@ -612,14 +760,29 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
       setKeymapOverrides(merged)
     }
+    // The /settings default-reasoning-effort field (effortDefault): re-seat
+    // the channel's future-sessions default without touching effort.json
+    // (the user layer outranks that file). Only the field's own changes
+    // re-apply — unrelated settings edits must not disturb a live /effort
+    // choice mid-session.
+    let lastEffortDefault: string | null | undefined = undefined
+    const applyEffortDefault = (value: SettingsValue): void => {
+      const next = value.effortDefault ?? null
+      if (next === lastEffortDefault) return
+      lastEffortDefault = next
+      const level = next === null || next === 'auto' ? undefined : next
+      channel.setDefaultEffort(level)
+    }
     const apply = (next: SettingsValue): void => {
       applyLayout(next)
       applyWhale(next)
+      applyWhaleIdle(next)
       applyMinimal(next)
       applyLang(next)
       applyDisplay(next)
+      applyEffortDefault(next)
       applyShortcuts(next)
-      applyFullscreen(next)
+      applyRendererSettings(next)
     }
     // One-time fullscreen factory-default migration (companion to the
     // schema + cordis.patch.yml flip false→true): a `fullscreen: false`
@@ -630,7 +793,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // boot decision cannot wait for the async doc write — the stale value
     // is shadowed out of the first apply below (destructuring omission,
     // not an explicit undefined), and the later watch commit (fullscreen
-    // back to undefined) is a no-op for applyFullscreen.
+    // back to undefined) leaves the fullscreen decision unchanged.
     const bootSettings = scope.get()
     const fullscreenMigration = planFullscreenFactoryMigration(bootSettings.fullscreen, readAppliedMigrations())
     void commitFullscreenFactoryMigration(fullscreenMigration, {
@@ -641,11 +804,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
     const { fullscreen: staleFullscreen, ...migratedSettings } = bootSettings
     apply(fullscreenMigration === 'unset' ? migratedSettings : bootSettings)
+    let lastTerminalImages = bootSettings.terminalImages ?? config.terminalImages ?? true
     scope.watch(next => {
       apply(next)
       if (typeof next.fullscreen === 'boolean' && next.fullscreen !== bootedFullscreen) {
         channel.notify(t('settings-fullscreen-restart'), { color: 'warning' })
       }
+      const terminalImages = next.terminalImages ?? config.terminalImages ?? true
+      if (terminalImages !== lastTerminalImages && terminalImages !== bootedTerminalImages) {
+        channel.notify(t('settings-terminal-images-restart'), { color: 'warning' })
+      }
+      lastTerminalImages = terminalImages
     })
     resolveSettingsReady?.()
   })
@@ -718,6 +887,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       zh: '待办折叠快捷键',
       hintEn: d => `Fold/unfold the goal/todo panel. Default: ${d}.`,
       hintZh: d => `折叠/展开目标与待办面板。默认 ${d}。`,
+    },
+    expandEditor: {
+      label: 'Fullscreen editor shortcut',
+      zh: '全屏草稿编辑快捷键',
+      hintEn: d => `Toggle the fullscreen draft editor (Enter inserts a newline, Ctrl+Enter sends). Default: ${d}.`,
+      hintZh: d => `切换全屏草稿编辑器（Enter 换行、Ctrl+Enter 发送）。默认 ${d}。`,
     },
   }
   const shortcutFields: TuiSettingsField[] = SHORTCUT_ACTIONS.map(action => {
@@ -797,6 +972,24 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           },
         },
         {
+          path: ['terminalImages'],
+          label: terminalImagesDisabledByEnv ? 'Image previews (forced off)' : 'Terminal image previews',
+          descriptions: { zh: terminalImagesDisabledByEnv ? '图片预览（环境强制关闭）' : '终端图片预览' },
+          hint: terminalImagesDisabledByEnv
+            ? 'Checkbox saves your preference. Relaunch without DSH_TUI_DISABLE_TERMINAL_IMAGES to enable previews.'
+            : 'Preview images in supported terminals. Use /restart to apply. Sending images is unaffected.',
+          hintDescriptions: {
+            zh: terminalImagesDisabledByEnv
+              ? '勾选框保存预览偏好；移除 DSH_TUI_DISABLE_TERMINAL_IMAGES 后重新启动才能显示图片。'
+              : '在支持的终端中预览图片。修改后用 /restart 生效；不影响向模型发送图片。',
+          },
+          kind: 'boolean',
+          format(value: unknown): string {
+            // The editor toggles this value; runtime overrides must not replace the preference.
+            return String(value ?? config.terminalImages ?? true)
+          },
+        },
+        {
           path: ['diffLayout'],
           label: 'Diff layout',
           descriptions: { zh: 'diff 布局' },
@@ -813,8 +1006,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           path: ['thinkingFold'],
           label: 'Thinking display',
           descriptions: { zh: '思考块展示' },
-          hint: 'Streaming thinking shows a 2-3 line live preview and each step folds when it settles; Full keeps thinking expanded until the turn ends.',
-          hintDescriptions: { zh: '流式时思考显示 2-3 行动态预览，每步落定后折叠；展开模式保持思考展开直到整轮结束。' },
+          hint: 'Preview shows 2-3 live lines; Full stays expanded until turn end. Click a streaming block to switch between preview and full.',
+          hintDescriptions: { zh: '预览模式显示 2-3 行动态思考；展开模式保持至轮末。点击流式思考块可在预览与全文间切换。' },
           kind: 'select',
           options: [
             { value: 'preview', label: 'Preview (2-3 lines)', descriptions: { zh: '预览（2-3 行）' } },
@@ -848,6 +1041,31 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           ],
         },
         {
+          path: ['pageMargin'],
+          label: 'Page margin',
+          descriptions: { zh: '页边距' },
+          hint: 'Inset the whole UI from the terminal edges. ←/→ cycles presets (none / slim / normal / roomy); Enter types a custom spec `NxM`: N columns per side, M rows top/bottom (e.g. 3x1, max 8x4; a bare `N` keeps rows at 1). Empty resets to the default `normal`. Applies immediately.',
+          hintDescriptions: { zh: '让整个界面相对终端四边内缩。←/→ 循环预设（none / slim / normal / roomy）；Enter 输入自定义 `NxM`：左右各 N 列、上下各 M 行（如 3x1，上限 8x4；只填 N 则上下保持 1 行）。清空恢复默认 normal。立即生效。' },
+          kind: 'text',
+          placeholder: 'normal',
+          options: [
+            { value: 'none', label: 'None', descriptions: { zh: '无' } },
+            { value: 'slim', label: 'Slim', descriptions: { zh: '窄' } },
+            { value: 'normal', label: 'Normal', descriptions: { zh: '常规' } },
+            { value: 'roomy', label: 'Roomy', descriptions: { zh: '宽' } },
+          ],
+          format(value: unknown): string {
+            return String(value ?? config.pageMargin ?? DEFAULT_PAGE_MARGIN)
+          },
+          parse(text: string) {
+            const draft = text.trim().toLowerCase()
+            if (draft === '') return { kind: 'clear' }
+            if (isPageMarginMode(draft)) return { kind: 'set', value: draft }
+            const spec = parsePageMarginSpec(draft)
+            return spec === undefined ? undefined : { kind: 'set', value: spec }
+          },
+        },
+        {
           path: ['foldTerminalCommand'],
           label: 'Fold terminal command',
           descriptions: { zh: '折叠终端命令' },
@@ -869,6 +1087,30 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           kind: 'boolean',
         },
         {
+          path: ['expandEditor'],
+          label: 'Fullscreen draft editor',
+          descriptions: { zh: '全屏草稿编辑' },
+          hint: 'On: the ⛶ affordance in the input row and the expand-editor shortcut (default Ctrl+Shift+E) expand the draft into a whole-screen editor (Enter = newline, Ctrl+Enter = send). Off: both entry points disappear. On by default.',
+          hintDescriptions: { zh: '开启：输入行尾 ⛶ 按钮与全屏编辑快捷键（默认 Ctrl+Shift+E）把草稿展开成整屏编辑器（Enter 换行、Ctrl+Enter 发送）。关闭：两个入口都不显示。默认开启。' },
+          kind: 'boolean',
+          format(value: unknown): string {
+            // Unset in settings.yaml: the effective default is on.
+            return String(typeof value === 'boolean' ? value : config.expandEditor !== false)
+          },
+        },
+        {
+          path: ['smoothStreaming'],
+          label: 'Smooth streaming',
+          descriptions: { zh: '流式平滑输出' },
+          hint: 'Reveal live replies, expanded thinking, and tool-call bodies through an even ~30fps flow instead of per-burst jumps; one-shot non-streaming replies paint as a flow too. Replay/history always paints complete. On by default.',
+          hintDescriptions: { zh: '把实时回复、展开的思考与工具卡正文按 ~30fps 匀速揭示，不再随供应商突发一跳一跳；一次性到达的非流式回复也会平滑打出。回放/历史内容始终完整直出。默认开启。' },
+          kind: 'boolean',
+          format(value: unknown): string {
+            // Unset in settings.yaml: the effective default is on.
+            return String(typeof value === 'boolean' ? value : config.smoothStreaming !== false)
+          },
+        },
+        {
           path: ['recapOnOpen'],
           label: 'Auto recap on open',
           descriptions: { zh: '打开会话时自动总结' },
@@ -878,6 +1120,30 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           format(value: unknown): string {
             // Unset in settings.yaml: the default is on.
             return value === undefined || value === null ? 'true' : String(value)
+          },
+        },
+        {
+          path: ['effortDefault'],
+          label: 'Default reasoning effort',
+          descriptions: { zh: '默认推理强度' },
+          hint: 'Reasoning-effort level new sessions start on; the current session applies it to its next request too, when the model offers the tier (an unlisted level falls back to the model default). Auto = follow the cordis.yml `effort` pin, then the persisted /effort choice, then the model default.',
+          hintDescriptions: { zh: '新会话起始的推理强度档位；模型提供该档位时，当前会话的下一请求也会应用（模型不提供的档位会静默回落到模型默认）。自动 = 依次跟随 cordis.yml 的 effort 配置、持久化的 /effort 选择、模型默认档。' },
+          kind: 'select',
+          options: [
+            { value: 'auto', label: 'Auto (model default)', descriptions: { zh: '自动（模型默认）' } },
+            { value: 'off', label: 'Off', descriptions: { zh: '关闭' } },
+            { value: 'low', label: 'Low', descriptions: { zh: '低' } },
+            { value: 'high', label: 'High', descriptions: { zh: '高' } },
+            { value: 'max', label: 'Max', descriptions: { zh: '最高' } },
+          ],
+          format(value: unknown): string {
+            // Unset in settings.yaml: show what a boot would actually start
+            // on (the cordis effort pin → the persisted /effort choice)
+            // instead of a misleading blank.
+            if (value === undefined || value === null || value === 'auto') {
+              return config.effort ?? readEffortPref() ?? 'auto'
+            }
+            return String(value)
           },
         },
         ...shortcutFields,
@@ -1052,6 +1318,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           kind: 'boolean',
         },
         {
+          path: ['whaleIdle'],
+          label: 'Idle whale behaviors',
+          descriptions: { zh: '鲸鱼娘闲置动画' },
+          hint: 'After the intro, the whale keeps fluttering its fins, thumping its tail, and falls asleep when idle; clicking it always pops a heart. Adds repaints while idle.',
+          hintDescriptions: { zh: '开屏之后鲸鱼娘继续摆动鱼鳍、偶尔拍尾巴，长时间空闲会睡觉；点击冒爱心始终可用。空闲时会增加少量重绘。' },
+          kind: 'boolean',
+        },
+        {
           path: ['minimal'],
           label: 'Minimal mode',
           descriptions: { zh: '极简模式' },
@@ -1066,17 +1340,29 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // DSH approval seam: the permission layer asks ApprovalService.request(),
   // which dispatches an `approval/request` waterfall. With no answerer the
   // chain falls through to the fail-closed 'unavailable', so register this
-  // TUI as the interactive answerer for the agent it owns; requests for
-  // other agents delegate down the chain (next()). Guarded on the service
-  // being mounted — a bare composition without the dsh-base approval row
-  // has nothing to answer into. channel.agentId tracks agent swaps
-  // (/new, /resume, rewind), so ownership is re-evaluated per request.
+  // TUI as the interactive answerer for EVERY agent in this process — the
+  // attached session's asks and any background (agent view) session's asks
+  // alike, so an unattended session surfaces as "needs input" instead of
+  // failing closed. One ask is shown at a time, whichever agent asked.
+  // Guarded on the service being mounted — a bare composition without the
+  // dsh-base approval row has nothing to answer into.
   const approvalStore = new ApprovalStore()
   if (ctx.get('approval') !== undefined) {
     ctx.on('approval/request', (req, next) =>
-      String(req.agent.id) === channel.agentId ? approvalStore.park(req) : next())
+      approvalStore.park(req).catch(() => next()))
+    // Badge-flip push (P-4): React does not know the session log appended —
+    // a source-badge verdict that only flips inside getSnapshot() surfaces
+    // solely when something else re-renders. Feed the session firehose to
+    // the store: it reacts only to tool/result (the sole verdict-flipping
+    // event type), and its internal log-length memo skips appends from any
+    // session other than the active ask's, so no agent filtering is needed
+    // here. The firehose fires post-commit, after the event entered
+    // the live session log, so the recheck sees the settled result.
+    ctx.on('session/event', (_session, event) => approvalStore.noteSessionEvent(event))
     ctx.effect(() => () => approvalStore.settleAll('cancelled'))
   }
+  // The agent view reads parked ask ids for its "needs input" state.
+  channel.bindApprovalStore(approvalStore)
   const herdr = attachHerdrIntegration({
     channel,
     questions: questionStore,
@@ -1094,11 +1380,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // timing is needed; flag-shaped leftovers are not prompt text.
   const cmdline = (ctx as { cmdlineArgs?: { get?: () => readonly string[]; args?: readonly string[] } }).cmdlineArgs
   const cmdlineArgs = cmdline?.get?.() ?? cmdline?.args
-  const initialPrompt = cmdlineArgs?.filter(arg => !arg.startsWith('-')).join(' ').trim()
+  const initialPrompt = initialPromptFromCmdlineArgs(cmdlineArgs)
   if (initialPrompt) channel.submit(initialPrompt)
   // Attach the stderr reporter to the live channel and flush anything a
   // startup-spawned server produced while the channel didn't exist yet.
   notifyStderr = (text, options) => channel.notify(text, options)
+  // The question-seat alert was raised before the channel existed; flush it
+  // now so it lands as an in-UI notice, not only in the log file.
+  if (questionSeatNotice !== undefined) {
+    channel.notify(questionSeatNotice, { color: 'error' })
+    questionSeatNotice = undefined
+  }
   for (const [text, options] of stderrBacklog.splice(0)) {
     notifyStderr(text, options)
   }
@@ -1152,11 +1444,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         } catch {
           // Resume persistence is best effort and must never block an update.
         }
+        const hintText = isStandaloneRuntime()
+          ? t('update-standalone-starting')
+          : t('update-starting')
         void finishExit(
           ctx,
           instance,
           bootedFullscreen,
-          'Updating @deepseek-harness-tui/dsh-tui and restarting…',
+          hintText,
           undefined,
           () => runUpdate(ctx, profile, channel.agentId, updateTargetVersion),
         )
@@ -1218,6 +1513,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   const handleExit = funnel.handleExit
 
+  // External injection controller: Chat fills it with `{ append, submit }`
+  // every render; the injection socket (opened below) drives it. A ref rather
+  // than a prop callback so the socket handler always reaches the live Chat.
+  const injectControllerRef = React.createRef<InjectController | null>() as React.RefObject<InjectController | null>
+
   // Chat's `fullscreen` prop must match the root wrap below, or the
   // full-screen surfaces inside Chat (session browser, settings, trajectory,
   // subagent pages) would nest a SECOND <AlternateScreen> — whose unmount
@@ -1231,12 +1531,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     channel,
     questionStore,
     approvalStore,
+    injectControllerRef,
     // The dsh-tui-extensions row's services (managed dialogs, status line,
     // shortcuts). Soft-consumed: absent the row (stale patch, bare embed),
     // Chat falls back to inert stores and no shortcut registry.
     extensionDialogs: getHostDialogStore(ctx.get('tuiDialogs') as TuiDialogRuntime | undefined),
     extensionStatus: getHostStatusStore(ctx.get('tuiStatus') as TuiStatusRuntime | undefined),
     extensionShortcuts: getHostShortcuts(ctx.get('tuiShortcuts') as TuiShortcutRuntime | undefined),
+    themeHost,
     // Full-screen surfaces inside Chat — the trajectory scene and the session
     // browser — enter the alt screen themselves in inline mode; in fullscreen
     // the tree is already wrapped below, so they must not nest.
@@ -1284,7 +1586,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           }
           updateTargetVersion = target.latest
         }
-        channel.notify(t('update-starting'))
+        if (isStandaloneRuntime()) {
+          channel.notify(t('update-standalone-starting'))
+        } else {
+          channel.notify(t('update-starting'))
+        }
         updateRequested = true
         handleExit()
       })
@@ -1302,19 +1608,27 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (bootedFullscreen === false && lastBootedFullscreen === true) {
     bootedFullscreen = true
   }
-  fullscreenFrozen = true
+  rendererSettingsFrozen = true
   // fullscreen: wrap the tree in <AlternateScreen> (DEC 1049 + SGR mouse
   // tracking), which turns on in-app text selection (copy-on-select via
   // useCopyOnSelect), wheel scroll, and click/hover hit-testing. Inline
   // mode leaves the mouse to the terminal emulator's native selection.
-  const tree = React.createElement(
-    ThemeProvider,
-    null,
-    bootedFullscreen ? React.createElement(AlternateScreen, null, chat) : chat,
-  )
-  instance = await render(tree, { exitOnCtrlC: false })
+  // PageMargin keeps the whole UI inset from the terminal edges (some
+  // terminals — bare WSL/tmux/SSH — have no own padding, so text touches
+  // the screen border). It must sit INSIDE AlternateScreen: the alt-screen
+  // box sizes itself to the real terminal rows, while PageMargin reports
+  // content-box dimensions to everything below it.
+  const marginChildren = bootedFullscreen
+    ? React.createElement(AlternateScreen, null, React.createElement(PageMargin, null, chat))
+    : React.createElement(PageMargin, null, chat)
+  const tree = React.createElement(ThemeProvider, {
+    themeHost,
+    children: marginChildren,
+  })
+  instance = await render(tree, { exitOnCtrlC: false, terminalImages: bootedTerminalImages })
   const isRecompose = lastBootedFullscreen !== undefined
   lastBootedFullscreen = bootedFullscreen
+  lastBootedTerminalImages = bootedTerminalImages
   logMouseDebug('apply mount', { bootedFullscreen, isRecompose })
   // /restart handoff diagnosis: the replacement got all the way to a mounted
   // UI, so any later death is post-boot (and its stderr keeps flowing to the
@@ -1323,13 +1637,38 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     logRestartEvent('boot: UI mounted', { fullscreen: bootedFullscreen, isRecompose })
   }
 
+  // External injection channel (dsh.nvim etc.): expose a per-session local
+  // socket that appends text into the prompt input and submits it. Optional
+  // integration — a bind failure degrades to "no channel" and never fails the
+  // session. Closed on teardown so the socket and discovery record do not leak.
+  const injectChannel = openInjectChannel(
+    agent.session.id,
+    channel.cwd,
+    {
+      append: (text) => injectControllerRef.current?.append(text),
+      submit: () => injectControllerRef.current?.submit(),
+    },
+    (message) => ctx.logger.warn(`dsh-tui: ${message}`),
+  )
+  if (injectChannel) {
+    ctx.effect(() => () => injectChannel.close())
+  }
+
   // Check in the background so registry latency never delays the first frame.
   // A failed/offline check is intentionally silent; the manual `/update`
   // command remains available regardless of network access.
   void checkForTuiUpdate().then((update) => {
     if (update === undefined || exited || updateRequested) return
+    const key = update.isStandalone ? 'update-standalone-available' : 'update-available'
+    // A standalone release without a SHA256SUMS asset (published before the
+    // checksum workflow landed) still updates, but the notice must say the
+    // package's integrity cannot be verified — silent degradation is exactly
+    // how the unverified-download window went unnoticed.
+    const suffix = update.isStandalone && update.checksumUrl === undefined
+      ? ` ${t('update-standalone-no-checksum')}`
+      : ''
     channel.notify(
-      t('update-available', { current: update.current, latest: update.latest }),
+      `${t(key, { current: update.current, latest: update.latest })}${suffix}`,
       { color: 'warning', timeoutMs: 12000 },
     )
   })
@@ -1427,7 +1766,7 @@ async function resolveAgent(
         agent: resumed.agent,
         handle: resumed,
         agentPreset: composed.agentPreset,
-        route: resumeRoute ?? recordedModelRoute(resumed.agent.session.events),
+        route: resumeRoute ?? recordedModelRoute(snapshotLiveSessionEvents(resumed.agent.session)),
       }
     } catch (error) {
       // A launch-time --resume is an explicit request: silently substituting a
@@ -1444,7 +1783,13 @@ async function resolveAgent(
     }
   }
   const sessionId = SessionId(randomUUID())
-  const composed = await composePreset(ctx, configuredPreset ?? readPresetPref())
+  const presetPref = configuredPreset === undefined ? readPresetPref() : undefined
+  const composed = await composePreset(ctx, configuredPreset ?? presetPref)
+  if (!migratePresetPref(presetPref, composed.agentPreset)) {
+    ctx.logger.warn(
+      `dsh-tui: resolved preset preference "${presetPref}" as "${composed.agentPreset}" but could not persist the migrated id`,
+    )
+  }
   // Fresh-session route precedence (issues #14/#30/#67): resolved atomically
   // by the caller (complete cordis.yml route > the persisted `/model` choice
   // > the harness default), then validated against the adapter catalog — a
@@ -1531,7 +1876,7 @@ export function isExitResumable(deps: {
   const agent = deps.liveAgent ?? deps.startupAgent
   return (
     deps.pendingCount > 0 ||
-    agent.session.events.some(
+    snapshotLiveSessionEvents(agent.session).some(
       event => event.type === 'user/message' && event.data.source.kind === 'user',
     )
   )
@@ -1641,6 +1986,9 @@ export async function finishExit(
   } catch {
     ctx.logger.debug('dsh-tui: terminal cleanup failed; continuing with process shutdown')
   }
+  // Filesystem-only: the exported clipboard images live in a per-process
+  // temp directory that nothing else removes.
+  removeClipboardImageDir()
   done()
 }
 

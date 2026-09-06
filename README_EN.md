@@ -47,7 +47,54 @@ the interface, and removing it leaves no core modifications behind.
   requested lines, clamping past-EOF ranges or falling back to the whole file
   with a note), history
   search, message selection, inline or alternate-screen rendering, and `/lang`
-  zh/en UI language switching.
+  zh/en UI language switching. Durable image blocks from user attachments and
+  assistant/tool output render as in-transcript previews through Kitty graphics or Sixel,
+  with a same-size text fallback when graphics are unavailable. In fullscreen,
+  clicking a staged `[Image #N]` token or a transcript thumbnail opens one
+  shared preview centered over the transcript, dimming the conversation around
+  it and leaving the prompt visible (Esc or click outside closes); its title reads `Image #N — format · size · bytes ·
+  file name` and images staged in this session show their source path on the
+  card's bottom row. Finder-copied
+  image files paste straight into the attachment store as `[Image #N]`; in the
+  composer a staged `[Image #N]` is one unit — the caret steps over it, deletes
+  remove it whole, and while the caret sits on it the token inverts and its
+  preview opens, closing again when the caret leaves. Vim `x`/`X`/`d…` also
+  delete whole attachments, and `u` restores both text and attachment bindings;
+  undo stays within the current draft.
+  Terminal image previews default to on. Disable them in `/settings → Terminal image previews`
+  or set `terminalImages: false`, then use `/restart` to apply. A saved `/settings` choice takes
+  precedence over Cordis configuration; if it was saved as enabled, turn it off in `/settings`
+  before restarting. Disabled previews keep text
+  metadata and skip preview decoding; sending images to the model is unaffected.
+  `DSH_TUI_DISABLE_TERMINAL_IMAGES=1` always forces previews off.
+  Windows Terminal with Sixel support displays embedded transcript thumbnails
+  and the fullscreen preview card. Non-fullscreen inline mode stays text-only.
+  Sixel uses a bounded 256-color adaptive palette and background-composited
+  transparency. A worker caches quantized pixels and encodes only the visible
+  crop while scrolling; removed or covered images are erased. Attachment reads
+  and decodes share two execution slots and cancel when their last consumer leaves.
+  Queues, caches and frame transfers are bounded, with text fallback on overflow.
+  Detection prefers Kitty, then Sixel advertised by DA1.
+  `DSH_TUI_IMAGE_PROTOCOL=auto|kitty|sixel|none` overrides protocol selection;
+  `DSH_TUI_DISABLE_TERMINAL_IMAGES=1`, accessibility mode, non-TTY output and
+  tmux/screen still disable graphics. Missing image dependencies or an encoding
+  failure preserve the text fallback. The override does not enable inline Sixel.
+  Light-theme panels and image previews use white surfaces with neutral preview borders.
+  Large previews target about 95% of the transcript area, with up to a 2048-pixel edge
+  and a bounded total pixel budget; thumbnail sizing is unchanged.
+  Fit, actual pixels (100%), and 200%/400%/800% zoom are available, with drag,
+  wheel, or arrow-button panning. Actual pixels requires reported terminal cell metrics.
+  The bottom Open original link launches the system image viewer with the unchanged
+  attachment bytes, including images restored from history.
+  In a modal, Left/Right or the bottom ‹/› controls switch images with an index
+  indicator, without wrapping at the ends. Each new image starts in Fit mode.
+- **Pixel whale pet**: one of three randomized startup intros plays on every
+  launch; **clicking the whale pops a heart pass** any time, and with
+  `/settings → whaleIdle` enabled the settled whale keeps fluttering its fins
+  and thumping its tail, swims continuously while the agent works, falls
+  asleep with Z's after 10s of inactivity, and wakes on any work. The 22
+  hand-drawn frames and the idle behaviors are ported from
+  [dsh-ui-whale](https://github.com/lhh010/dsh-ui-whale) by [@lhh010](https://github.com/lhh010).
 - **Timeline navigation**: a Grok-style turn rail covering **every turn
   (folded ones included)** — even when the fold window only exposes the last
   few turns, the full history stays one click away (clicking a folded tick
@@ -57,12 +104,25 @@ the interface, and removing it leaves no core modifications behind.
   timeline / scrollbar / hidden modes.
 - **Visible agent state**: live activity, segmented context usage, TPS, cache
   hit rate, reasoning effort, input/output tokens, and Git/session metadata.
-- **Complete session workflow**: `/resume`, `/new`, `/workspace`, `/compact`, `/export`, the
-  `/btw` side question, model switching, and double-`Esc` rewind through a
-  session fork.
+  In fullscreen, hovering a truncated tool header, wrapped user prompt, or
+  session title for ~600ms opens a tooltip with the full content.
+- **Complete session workflow**: `/resume` groups history by working directory
+  with search and preview (left-click resumes, right-click opens an action
+  menu; pin frequent sessions — a `Pinned` group floats them to the top, the
+  in-row star or `Ctrl+P` toggles, pins persist in `~/.dsh-tui`), alongside
+  `/new`, `/workspace`, `/compact`, `/export`,
+  the `/btw` side question, model switching, double-`Esc` rewind through a
+  session fork, vim editing for the prompt (`/vim`), mouse selection
+  editing in the prompt (drag to select, Shift+click to extend,
+  double-click word select, `Ctrl+C` to copy the selection), and a
+  fullscreen draft editor (`Ctrl+Shift+E` or the `⛶` row button: line
+  numbers, current-line highlight, `Enter` = newline, `Ctrl+Enter` = send,
+  wheel scrolling, click/drag selection — long drafts get the whole
+  screen; disable it in `/settings`).
 - **Official DSH integrations**: agent presets, skills, MCP, goals, todos,
   subagents, and `ask_user_question` are connected through existing services
-  and registries.
+  and registries. `/skills` shows skills discovered from the active profile,
+  user, and project; dsh-TUI does not preinstall general-purpose skills.
 - **Designed for long sessions**: event-driven projection, differential output,
   message virtualization, replay coalescing, and bounded caches prevent render
   cost and memory from growing without limit; fingerprint-memoized hot paths
@@ -184,18 +244,22 @@ For migration from the former `dsh-cc-tui` package and `cc-tui` profile, see
 | `Ctrl+Enter` (⌘Enter) | **Interrupt the current turn and send immediately** (interrupt) |
 | `Alt+Up` | Pull the last unhandled message back into the input for editing (without interrupting the turn) |
 | `Tab` | Complete `/` commands or `@` files (keep drilling into directories); **while the model is working = follow-up** (queued after the current turn) |
-| `Ctrl+C` | Interrupt the current turn; press again while the interrupt is still settling to force-exit; press twice while idle to exit |
-| `Esc` | Close the command/file menu; double-press while idle clears the input; **double-press on empty input = time rewind** |
+| `Ctrl+C` | Interrupt the current turn; press again while the interrupt is still settling to force-exit; press twice while idle to exit; **with an active mouse selection in the prompt, copies it to the clipboard and keeps it** |
+| `Esc` | Close an open image preview; close the command/file menu; **with an active selection in the prompt: only clears the selection**; double-press while idle clears the input; **double-press on empty input = time rewind** |
+| `←` (empty input) | **Background this session and open the agent view** (CC agent view; with text, ← moves the caret as usual) |
 | `Ctrl+O` | Expand/collapse details (full thinking text, tool arguments and output) |
+| `Ctrl+Shift+E` | Expand the fullscreen draft editor (Enter = newline, `Ctrl+Enter` = send, `Esc` = collapse keeping the draft; line numbers, wheel scrolling, click/drag selection) |
 | `Ctrl+R` | History search |
 | `/` | In-session full-text search (`n`/`N` to jump) |
 | `Ctrl+V` / `Alt+V` | Paste text or files from the file manager; images show as `[Image #N]` and are sent as durable attachments. Use `Alt+V` when the terminal intercepts `Ctrl+V` |
 | `Ctrl+G` | Edit the current input with `$VISUAL`/`$EDITOR` (e.g. nvim); content is filled back in on save and exit |
+| `/vim` | Toggle vim editing for the prompt (session-scoped): `Esc` switches to NORMAL (`h/l/j/k`, `0/^/$`, `w/b`, `x/X`, `dd`/`d$`/`d0`/`dw`, `u` undo), `i/a/o` back to INSERT |
 | `?` | Keybinding menu (responds only when the input is empty) |
 | `Shift+↑` | Message selection mode (`Enter` expands a single message) |
-| `Ctrl+P` | Toggle the startup loaded-context panel (effective while the panel is on screen) |
-| `Home` / `End`, `Ctrl+A` / `Ctrl+E` | Logical line start / end; `Ctrl+E` is dual-purpose: line end in the input, expand/collapse hidden older messages during transcription |
+| `Ctrl+P` | Toggle the startup loaded-context panel while it is on screen; inside `/resume`, pin/unpin the selected session |
+| `Home` / `End`, `Ctrl+A` / `Ctrl+E` | `Ctrl+A` opens the subagent dashboard (in-editor `Mod+A` still moves to line start); `Ctrl+E` is dual-purpose: line end in the input, expand/collapse hidden older messages during transcription |
 | `Ctrl+←` / `Ctrl+→` (⌘←/→) | Jump by word |
+| `←` / `→` (image modal) | Previous / next image; caret peeks retain prompt editing |
 | `Ctrl+U` / `Ctrl+K` | Delete before the cursor (to line start) / after the cursor (to line end) |
 | `Ctrl+W` | Delete the previous word |
 
@@ -217,10 +281,15 @@ so keep using `Ctrl`.
 |---|---|
 | Drag to select | In-app text selection, **copied on release** (OSC 52 with native `wl-copy`/`xclip`/`xsel` fallback; `load-buffer -w` inside tmux); the selection is cleared after copying and a "Copied N characters" notice pops up |
 | Double / triple click | Select word / line, copied on selection just the same |
+| Drag inside the prompt input | Build an in-input selection (rendered highlight): `Backspace`/`Delete` delete it, typing replaces it, `←/→` collapse it to the corresponding edge, `Esc` only clears it; a folded paste block keeps the selection on the clicked side |
+| `Shift+click` in the prompt input | Extend the selection from its start edge (or the caret) to the clicked position |
+| Double-click a word in the prompt input | Select the whole word (paths and punctuation runs select as one; detected in the component, 500 ms / 1 cell) |
+| `Ctrl+C` with a prompt selection | Copy the selection to the clipboard (OSC 52 + native fallback) and keep it for editing |
 | Scroll wheel | Only with fullscreen mouse tracking: scroll Help while it is open, otherwise scroll messages (±3 lines per notch); default inline mode does not deliver wheel events to the TUI |
 | Click a timeline-rail tick | Jump to that turn — the rail covers every turn (folded ones included); a folded tick reveals its turn first, then scrolls it into place |
 | `Esc` | Cancel an in-progress drag selection (no copy) |
 | Single-click a message line | Expand/collapse that line |
+| Click a staged `[Image #N]` token / a transcript thumbnail | Open the centered image preview (metadata fallback without Kitty/Sixel graphics); click outside the preview to close it |
 | Click "load earlier messages" / "ctrl+e show previous N" | Load earlier messages / expand all |
 | Click the StickyHeader / "↓ N new messages" | Jump back to the pinned message / scroll to the bottom |
 | Click a hyperlink | Open it in your browser |
@@ -241,15 +310,38 @@ so keep using `Ctrl`.
 
 | Group | Commands |
 |---|---|
-| Session | `/new` new session · `/resume` session browser (search, preview, cross-project, sub-agent runs folded) · `/rename` rename session · `/recap` session recap (apply the suggested title in one key; `/settings` can enable an auto-summary on session open — on by default: a divider + `Recap:` line appears at the bottom of the transcript when resuming, and bows out once you send a new message) · `/workspace resume|rename|open` manage workspaces · `/clear` clear screen · `/compact` compact · `/export` export Markdown · `/trace` trace timeline (or `Ctrl+T`) · `/rewind` rewind picker (same as double-`Esc` on empty input) · `/tree` session family tree (every fork branch stitched together; hover previews a node, click opens a rewind/fork-here/adopt-branch menu) · `/fork` copy the current session into a resumable twin (the original is untouched) · `/btw <question>` side question (never interrupts the main turn, writes no history) |
+| Session | `/new` new session · `/resume` working-directory/session browser (visible directory scope, search, preview, cross-project, sub-agent runs folded) · `/agentview` agent view (all sessions) · `/bg` (alias `/background`) background this session and open the view · `/rename` rename session · `/recap` session recap (apply the suggested title in one key; `/settings` can enable an auto-summary on session open — on by default: a divider + `Recap:` line appears at the bottom of the transcript when resuming, and bows out once you send a new message) · `/workspace resume|rename|open` manage workspaces · `/clear` clear screen · `/compact` compact · `/export` export Markdown · `/trace` trace timeline (or `Ctrl+T`) · `/rewind` rewind picker (same as double-`Esc` on empty input) · `/tree` session family tree (every fork branch stitched together; hover previews a node, click opens a rewind/fork-here/adopt-branch menu) · `/fork` copy the current session into a resumable twin (the original is untouched) · `/btw <question>` side question (never interrupts the main turn, writes no history) |
 | Status | `/context` loaded-context details · `/status` session info · `/cost` token usage · `/doctor` environment self-check · `/config` configuration sources · `/init` create AGENTS.md · `/settings` settings panel (namespace read/edit) |
-| Model | `/model` two-level picker (a pinned **Recently used** group first — the last 10 switched models, persisted at `~/.dsh-tui/model-recents.json` — then provider groups; Enter drills into a group's models; a single provider with no recents skips straight to the list; **switching = fork continuation, history preserved**) · `/effort` reasoning effort (slider / `status` / `<id>`) · `/preset` agent preset (**cannot switch once the session has started** — blank-only) · `/thinking` thinking display · `/tokens` token details · `/activity` working animation (`frames <name>` / `status`) · `/theme` theme picker · `/color` (bare opens the palette picker; `<name>` sets directly; `status`/`reset`) session accent color (input border + session-name chip at the top-right, per-session; chip off by default, enable in `/settings`) · `/lang` zh/en UI switch (also selectable in `/settings`) |
-| Accounts/Policy | `/provider` add a model provider (includes the bundled dsh-auth **subscription OAuth sign-in** branch — ChatGPT / Claude / Grok, no API key; same source as `/auth status\|login\|logout`) · `/login` credential & account status · `/logout` logout notes · `/permissions` permission notes · `/add-dir` file-policy scope · `/hooks` · `/mcp` |
-| Skills | `/audit` code audit · `/bug` bug report · `/review` code review · `/practice` coding practice · `/pr-comments` PR comments · `/release-notes` release notes · `/vuln-check` vulnerability check |
-| Other | `/agents` subagent list · `/skills` skills directory · `/plugins check <path>` plugin diagnostics · `/update` auto-update and restart · `/vim` · `/terminal-setup` · `/connect` · `/help` · `/exit` (aliases `/quit` `/q`) |
+| Model | `/model` two-level picker (a pinned **Recently used** group first — the last 10 switched models, persisted at `~/.dsh-tui/model-recents.json` — then provider groups; Enter drills into a group's models; a single provider with no recents skips straight to the list; **switching = fork continuation, history preserved**) · `/effort` reasoning effort (slider / `status` / `<id>`; the default level new sessions start on is set in `/settings` → Default reasoning effort) · `/preset` agent preset (**cannot switch once the session has started** — blank-only) · `/thinking` thinking display · `/tokens` token details · `/activity` working animation (`frames <name>` / `status`) · `/theme` theme picker · `/color` (bare opens the palette picker; `<name>` sets directly; `status`/`reset`) session accent color (input border + session-name chip at the top-right, per-session; chip off by default, enable in `/settings`) · `/lang` zh/en UI switch (also selectable in `/settings`) |
+| Accounts/Policy | `/provider` manage model providers — add a provider, or edit an existing one via a menu (API key · model list · delete the provider; custom endpoints also get base URL · wire protocol; a targeted edit patches only that field, the rest of the profile survives untouched; the model list pre-checks what you already enabled; only user-layer providers are editable) (includes the bundled dsh-auth **subscription OAuth sign-in** branch — ChatGPT / Claude / Grok, no API key; same source as `/auth status\|login\|logout`) · `/login` credential & account status · `/logout` logout notes · `/permission` dynamic preset/status notes · `/add-dir` file-policy scope · `/hooks` · `/mcp` |
+| Skills | `/skills` lists skills discovered by DSH; user-invocable skills join the `/` menu as `/name` |
+| Other | `/agents` subagent list · `/plugins check <path>` plugin diagnostics · `/update` auto-update and restart · `/vim` vim editing mode toggle · `/terminal-setup` · `/connect` · `/help` · `/exit` (aliases `/quit` `/q`) |
 | Registry | `/plan` `/goal` `/feedback` `/permission` (DSH command-registry plugins, merged into the `/` menu automatically with the plugin) |
 
 > Unknown commands are sent to the model as ordinary messages (e.g. in a composition where `/permission` is not mounted).
+
+**Agent view** (`/agentview`)
+
+One full-screen surface for every session in this process: the attached conversation, the background sessions dispatched here, and the stopped TUI sessions persisted on disk. The header shows CC-style "model · directory" plus state counts (awaiting input · working · completed); rows are grouped by state (needs input > working > failed > completed > idle > stopped), **working rows animate their glyph with CC's `·✢*✶✻✽` frame cycle**, each with a one-line activity summary derived from the session's own output (no extra model calls) — a row waiting on input shows the question it is blocked on. **Only sessions this TUI dispatched, backgrounded, or attached to from the view are listed** — the ordinary `/resume` history and sessions created by other front doors (e.g. web) never appear.
+
+| Key | Action |
+|---|---|
+| `↑/↓`, `PgUp/PgDn` | Move between rows |
+| `Enter` / `→` | Attach to the selected session (with input text: dispatch it) |
+| `Shift+Enter` | Dispatch and attach immediately |
+| `Space` | Toggle the peek panel (when the input is empty); type a reply inside and `Enter` to send |
+| `Ctrl+X` | Stop a background session; press again within 2s to delete it (log removed) |
+| `Ctrl+R` | Rename the selected session |
+| `Esc` | Close peek → clear input → exit; **when opened via ← `/bg`, the final Esc returns to the backgrounded session** |
+| `Ctrl+C` | Clear input; press again to exit |
+| `?` | Show all shortcuts |
+
+- Type a task in the input at the bottom and press `Enter` to dispatch a **background session**: it runs independently inside this process (turns, tools, approvals all work) without you watching it.
+- **Press `←` on an empty prompt** to jump straight into the view: the attached session moves to the background — it keeps running — the terminal lands on a fresh session, and the view opens (same as `/bg`), with a "Your conversation moved to the background — Enter opens it · Esc returns to it · Ctrl+C twice quits" notice on top. The prompt footer keeps a live "← N agents" count whenever background sessions are waiting on you.
+- A background session that needs approval shows as **needs input**; the approval panel pops up right inside the view and is answered there (labelled with its session).
+- `/bg` (alias `/background`) moves the attached session to the background — it keeps running — switches the terminal to a fresh session, and opens the view. `Enter` on any row switches back.
+- Peek and reply work live for running sessions; a stopped session needs an `Enter` attach before you can talk to it.
+- **Background sessions live inside this process**: they stop when the TUI exits (logs survive; `/resume` or `Enter` in the view brings them back). There is no supervisor process.
 
 ## Documentation
 
@@ -257,7 +349,7 @@ so keep using `Ctrl`.
 | --- | --- |
 | [Getting started](docs/getting-started.en.md) | Prerequisites, installation, startup, profile lifecycle, source development |
 | [Configuration](docs/configuration.en.md) | Cordis overrides, fields, agent presets, MCP, environment variables |
-| [Themes](docs/themes.en.md) | Built-in themes, background detection, custom JSON themes, validation |
+| [Themes](docs/themes.en.md) | Built-in themes, background detection, static JSON and npm plugin themes, validation |
 | [Interaction and commands](docs/interaction.en.md) | Keyboard, mouse, questionnaires, slash commands, session workflows |
 | [Architecture and limitations](docs/architecture.en.md) | Runtime path, rendering, persistence, security boundary, known limitations |
 | [VS Code guide](docs/vscode.en.md) | Running dsh-tui in the VS Code integrated terminal; the `dsh-tui-vscode` companion extension offers an experience almost identical to the official Claude Code extension (on the Marketplace) |
@@ -268,15 +360,18 @@ The complete bilingual index is [`docs/README.md`](docs/README.md).
 
 ## Configuration & Extensions
 
-- **Agent presets**: four official agent modes (`standard` / `code` / `minimal` / `cordis`)
+- **Agent presets**: four official agent modes (`standard` / `ptc` / `minimal` / `cordis`)
   plus the TUI-bundled Liangshen mode (`liangshen`),
   switched with `/preset`; sessions that already have a conversation cannot switch, while
   blank sessions take effect immediately. The default preset persists in
   `~/.dsh-tui/agent-preset.json`; `/model` selections persist in `~/.dsh-tui/model.json`.
+  Under the `en` UI language the `/preset` picker shows localized English names
+  and descriptions for the built-in presets.
   See [Configuration](docs/configuration.en.md#agent-preset).
-- **Custom themes**: the `/theme` picker (`auto` follows the system/terminal background,
-  built-in `light` / `dark` / `dark-ansi`) also accepts custom themes from
-  `~/.dsh-tui/themes/<name>.json` — selecting one hot-swaps and persists it; precedence is
+- **Themes**: the `/theme` picker (`auto` follows the system/terminal background,
+  built-in `light` / `dark` / `dark-ansi`) accepts static themes from
+  `~/.dsh-tui/themes/<name>.json` and runtime themes registered by npm plugins through
+  `ctx.tuiThemes` — selecting one hot-swaps and persists it; precedence is
   `DSH_TUI_THEME` env var > persisted selection > OSC 11 terminal-background auto-detection.
   See [Themes](docs/themes.en.md).
 - **MCP**: servers are mounted via `@deepseek-ai/dsh-mcp-client`, with tools registered as
@@ -338,9 +433,9 @@ chat / tool base events ──> persisted Session log ──> TUI / Web
   deriving it in-process from base session events without writing UI state into the shared log.
 - **Terminal paste**: in raw mode `Ctrl+V` is handled by the app and reads the system
   clipboard per platform — PowerShell `Get-Clipboard` on Windows, `osascript`/`pbpaste`
-  on macOS, and auto-detected `wl-paste`/`xclip`/`xsel` on Linux; regular files insert
-  their path, image files generate an `@` reference, clipboard bitmaps are written to
-  the attachment library and shown in the input as `[Image #N]`, and plain text is
+  on macOS, and auto-detected `wl-paste`/`xclip`/`xsel` on Linux; regular non-image
+  files insert their path, while copied image files and clipboard bitmaps are written
+  to the attachment library and shown in the input as `[Image #N]`; plain text is
   inserted at the cursor.
 
 ## Known Limitations
@@ -357,16 +452,26 @@ chat / tool base events ──> persisted Session log ──> TUI / Web
   on macOS (multi-file copies in Finder have no stable AppleScript read path, falling
   back to text/images); Linux needs one of `wl-paste`/`xclip`/`xsel` and a connectable
   session (a missing tool or unreachable session shows a "no clipboard tool available"
-  notice). Unsupported image formats or an unavailable attachment service keep a
-  temporary file reference as a degraded fallback.
+  notice). Unsupported clipboard-bitmap formats are rejected with a warning and
+  their private temporary export is deleted; an unavailable attachment service
+  likewise leaves the bitmap out of the draft. Copied image files can still fall
+  back to an `@` reference when direct staging fails.
 - Exit finishes with a process exit and does not wait for the agent's async disk writes
   (persistence is covered by the persistence plugin as a backstop).
+- **Agent view background sessions live inside this process**: they all stop when the
+  TUI exits (CC's supervisor process and survival across restarts are out of v1 scope);
+  row summaries come from the session's own output with no extra summary-model calls;
+  worktree isolation, pinning, directory grouping, and shell background jobs are not
+  shipped yet.
 - Tool-level approval is implemented: the approval service + TUI answerer (CC-style
   approval panel) consumes the approval stream, and privilege-escalation commands pop
   an approval bar. `/permission` preset switching comes from dsh-base's
-  `permission-presets` plugin and is available in the profile composition by default;
-  the bare `cordis.yml` composition does not mount that plugin (no `/permission` command).
-- `/vim` `/connect` `/hooks` are CC-named placeholders: the corresponding
+  `permission-presets` plugin and is available in the profile composition by default.
+  If that registry service is absent, TUI uses its legacy three-row compatibility
+  roster; a malformed mounted service is unavailable and fails closed. If the
+  external `/permission` command is not registered, input keeps the existing
+  default/model dispatch behavior.
+- `/connect` `/hooks` are CC-named placeholders: the corresponding
   capabilities have no equivalent mechanism on the DSH side, and the commands give an
   explicit explanation rather than staying silent.
 - The `/thinking` display toggle is **not persisted**; restarts and new sessions fall
@@ -408,6 +513,22 @@ Want to build a plugin or extension for dsh-TUI? Join the ecosystem:
 - **Reference implementation**: `dsh-working-activity` (live working-status
   line with dual outlets: TUI prompt slot + `activity/status` session events)
 
+### Seam stability reference
+
+An **informal** maturity grading to help plugin authors gauge investment;
+the authoritative status and compatibility agreement live in the
+[admission & development guide](https://github.com/T-Auto/dsh-ecosystem-spec/blob/main/docs/plugin-admission-and-development.md):
+
+| Tier | Seams |
+| --- | --- |
+| Stable candidate (shape frozen; breaking changes go through a minor-version deprecation warning before removal) | VI settings sections · VIII full-screen scenes · X managed dialogs · XI status line · XII keyboard shortcuts · XIII entry renderers |
+| Experimental (may still shift with dsh-std / admission-spec evolution) | IX decision events · toast notifications (`ctx.tuiToast`, new) |
+| Upstream-tracked (stability owned by the cordis / dsh mechanisms underneath) | I session events · II official prompt slots · III bundled skills · IV themes · V system-prompt sections · VII profile composition |
+
+Also experimental public surfaces: `@deepseek-harness-tui/dsh-tui/test-utils`
+(headless admission/mounting test helpers) and `@deepseek-harness-tui/dsh-tui/api`
+(types-only entry).
+
 The core repository remains independent; community plugins live in their own
 repos. The organization only maintains the listing and admission rules — it
 does not endorse or warrant the functionality, quality, or safety of community
@@ -421,23 +542,43 @@ responsible for their maintenance and security.
   plugin, pitch an idea, or just hang out 🐋
 - **Chat groups** (Chinese-language): usage questions, plugin ideas, and
   feature wishes are all welcome.
+- **Code of conduct**: please read the
+  [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.en.md) before taking
+  part.
 
-| WeChat group | QQ group (ID 572549239) |
+| WeChat group (dsh-TUI community 4) | QQ group (ID 572549239) |
 | :---: | :---: |
-| <img src="screenshots/wechat-group.jpg" alt="dsh-TUI community WeChat group QR code" width="200"> | <img src="screenshots/qq-group.png" alt="dsh-TUI community QQ group QR code" width="200"> |
+| <img src="screenshots/wechat-group.jpg" alt="dsh-TUI community WeChat group 4 QR code" width="200"> | <img src="screenshots/qq-group.png" alt="dsh-TUI community QQ group QR code" width="200"> |
 
 > The WeChat QR code expires roughly every 7 days; if it stops working, use
 > the QQ group (572549239) or open an issue to nudge us for a refresh.
 
 ## Permissions and Security Boundary
 
+> **Windows security warning:** The Windows profile defaults to `danger-full-access` with approval set to `never`. Tools therefore have unrestricted access; before starting in an environment with sensitive credentials or an untrusted repository, inspect and tighten the profile configuration.
+
 `dsh-TUI` does not implement a separate sandbox. It uses the filesystem,
-shell, sandbox, and approval policies of the active DSH profile. The supplied
-profile uses workspace confinement and approvals by default on non-Windows
-platforms. Windows currently has no corresponding sandbox backend, so the
-composition falls back to `danger-full-access` without approval prompts.
-Inspect the profile before starting it around sensitive credentials or an
-untrusted repository.
+shell, sandbox, and approval policies of the active DSH profile. Permission
+presets come from the mounted DSH `permissionPresets` registry: third-party
+presets appear automatically in the picker, completion and the `Shift+Tab`
+cycle (excluding `custom`/`status`, canonical presets, duplicate identities
+and unsafe tokens), with the registry's declaration order kept stable across
+refreshes. `custom` is a current-state label only, never a selectable target.
+While the service snapshot is usable, `/permission` is surfaced as a first-class
+local command: switches prefer the official `/permission <preset>` command; when
+the command row never reaches the agent's registry, the TUI falls back to the
+permissionPresets service's own official write path (the same handler the
+command drives — real `permission/preset`/`sandbox/mode`/`approval/policy`
+events, never fabricated by the TUI) and confirms via event/readback; when
+neither path exists it fails loudly instead of silently falling through.
+Exiting plan mode restores the pre-plan atoms first, then returns the durable
+identity to the preset you were on before plan mode (while the registry still
+offers it).
+When the `permissionPresets` service is absent, TUI keeps its legacy three-row
+compatibility roster. A mounted but unusable service is marked unavailable and
+fails closed instead of inventing a roster. Inspect
+the profile before starting it around sensitive credentials or an untrusted
+repository.
 
 See [Permissions and security boundary](docs/architecture.en.md#permissions-and-security-boundary)
 for details.
@@ -446,6 +587,14 @@ for details.
 
 The DeepSeek Harness official WeChat account featured this plugin among its
 early user-built extensions. [View the feature screenshot](screenshots/wechat-official.png).
+
+## Acknowledgments
+
+- The pixel whale's 22 hand-drawn frames (drawn cell by cell in Excel) and
+  its idle behaviors (fin flutters, tail thumps, sleep Z's, click hearts)
+  are ported from **[dsh-ui-whale](https://github.com/lhh010/dsh-ui-whale)**
+  (the DeepSeek Harness web whale-pet plugin, by [@lhh010](https://github.com/lhh010),
+  BSD-3-Clause) — thank you for the art and the inspiration 🐋💜
 
 ## Friends' Links
 

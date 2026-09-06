@@ -37,6 +37,7 @@ Profile 启动按顺序叠加 `dsh-base`、已安装 bundle、`@deepseek-harness
     activityFrames: claude
     contextBar: true
     fullscreen: false
+    terminalImages: true
     preset: !!js process.env.DSH_TUI_PRESET ?? undefined
     workspace: !!js process.env.DSH_TUI_WORKSPACE_TARGET ?? undefined
     sessionId: !!js process.env.DSH_TUI_RESUME_SESSION ?? undefined
@@ -48,14 +49,24 @@ Profile 启动按顺序叠加 `dsh-base`、已安装 bundle、`@deepseek-harness
 | `model` | Harness `agentDefaultModel`；裸组合回落 `deepseek-v4-flash` | 启动模型；`/model` 可通过 session fork 实时切换 |
 | `cwd` | 启动目录所在的 git worktree 根（不在任何 worktree 内时为 `process.cwd()`；家目录的 dotfiles 仓不算） | TUI 会话侧工作区：agent meta、`@` 补全/提及展开、/resume 过滤、状态栏；恢复已有会话时以该会话持久化的 cwd 为准。注意 bash/fs-policy/sandbox 的根仍由组合层 cordis 配置决定（默认启动目录，归 dsh-base 管），与这里的会话侧 cwd 可能不同 |
 | `workspace` | 未设置 | 启动工作区目标；可用本地路径、`file://` URI 或插件提供的 URI，设置后优先于 `cwd` |
-| `effort` | 配置层通常为 `max` | 每个请求实际生效的推理等级（按模型档位校验，deepseek 仅 off/high/max，非法档位静默回落默认；优先于 `/effort` 持久化选择），兼作顶栏启动显示 |
+| `effort` | 配置层通常为 `max` | 每个请求实际生效的推理等级（按运行时模型档位校验，非法档位静默回落默认；兼作顶栏启动显示）。优先级：/settings 的默认推理强度 `effortDefault`（settings.yaml 用户层，`auto` 时让位）> 本字段 > `/effort` 持久化选择（`~/.dsh-tui/effort.json`）> 模型默认 |
 | `modes` | 内置三档 | Shift+Tab 会话模式循环（plan/sandbox/approval 原子组合）；缺省为 默认 → 计划 → 完全访问 |
 | `activity` | `true` | 是否显示实时工作状态行 |
 | `activityFrames` | 持久化选择或 `claude` | 工作状态动画预设；也可通过 `/activity` 修改 |
 | `contextBar` | `true` | 输入框下方的分段上下文进度条；`false` 隐藏该行 |
-| `fullscreen` | `false` | `true` 使用 alternate screen、应用内滚动和鼠标选区；`false` 使用 inline 模式 |
+| `fullscreen` | `true`（0.9.0 起出厂默认） | `true` 使用 alternate screen、应用内滚动和鼠标选区；`false` 使用 inline 模式 |
+| `terminalImages` | `true` | 允许在支持的终端预览图片；`false` 保留文字信息，跳过图片探测与预览解码。修改后重启生效 |
 | `preset` | 名册默认 `standard` | 新会话 Agent preset；显式配置优先于持久化偏好 |
 | `sessionId` | 未设置 | 要恢复的会话 ID，通常由 Windows `--resume` 启动器注入 |
+
+`/settings → 终端图片预览` 保存的选择优先于 `config.terminalImages`；未保存时使用配置值，
+默认开启。开启仍需终端支持 Kitty graphics 且处于允许图片渲染的显示模式。
+`DSH_TUI_DISABLE_TERMINAL_IMAGES=1` 始终强制关闭预览。关闭后不为预览读取或解码图片，
+也不发送图片渲染指令；向模型发送图片不受影响。
+勾选框编辑的是预览偏好；环境变量强制关闭时，设置行会单独标明「环境强制关闭」。
+
+这个开关在启动时读取。修改后使用 `/restart` 自动重新启动 TUI 并恢复当前会话；
+`/reload` 不应用此开关。回合运行中需先等待结束或用 `Ctrl+C` 停止，再重启。
 
 ## 工作状态行
 
@@ -77,7 +88,7 @@ Profile 启动按顺序叠加 `dsh-base`、已安装 bundle、`@deepseek-harness
 | ID | 名称 | 能力 |
 | --- | --- | --- |
 | `standard` | 标准模式（默认） | 编辑、Shell、检索、Skills、计划、Goals、子代理与工作流 |
-| `code` | PTC 模式 | 标准能力，加 Code Mode SDK 呈现工具，可用 TypeScript 组合多步操作 |
+| `ptc`（0.1.2）/ `code`（旧 0.1.1） | PTC 模式 | 标准能力，加 PTC SDK 呈现工具，可用 TypeScript 组合多步操作；两个名字可跨版本兼容解析 |
 | `minimal` | 极简模式 | 仅持久 Bash 与 `str_replace_editor`，不带 compaction |
 | `cordis` | 创造模式 | 标准能力，加运行时检查与插件实验工具 |
 | `liangshen` | 梁神模式 | 主 Agent 与子 Agent 首轮均保持 Minimal 双工具，首次工具调用后开放完整目录，压缩后重新锚定 |
@@ -86,9 +97,14 @@ Profile 启动按顺序叠加 `dsh-base`、已安装 bundle、`@deepseek-harness
 
 - `/preset` 打开选择器。
 - `/preset <id>` 直接选择；`/preset status` 查看当前状态。
+- 选择器显示的名称与描述取自各 preset 的 `preset.yml`（中文）。界面语言为
+  `en`（`/lang en`）时，内置 preset（`standard` / `minimal` / `code` / `cordis` /
+  `liangshen`）显示本地化的英文名称与描述；自定义 preset 原样显示。
 - 空白会话可以原地切换。已经产生对话的会话遵循官方 blank-only 规则，选择只会
   保存为新默认值，在 `/new` 或下一次启动时生效。
 - 默认值保存在 `~/.dsh-tui/agent-preset.json`。
+- 当当前名册已不再提供 `code` 时，旧偏好会回退解析为 `ptc`，成功解析后再迁移；
+  rc 名册仍保留其真实 `code` id，历史会话日志始终不改写。
 - 优先级为：显式 `config.preset` 或 `DSH_TUI_PRESET`，然后持久化偏好，最后名册
   默认值 `standard`。
 - 恢复旧会话时，以该会话日志记录的 preset 为准，不读取当前默认值覆盖它。
@@ -147,8 +163,10 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、
 | `DEEPSEEK_BASE_URL` | 覆盖 DeepSeek 兼容 API 端点 |
 | `DSH_TUI_PERSONA` | 覆盖组合注入的 Agent persona |
 | `DSH_TUI_PRESET` | 覆盖新会话默认 Agent preset |
-| `DSH_TUI_THEME` | 锁定内置（`auto`/`light`/`dark`/`dark-ansi`）或自定义主题，优先于持久化选择 |
+| `DSH_TUI_THEME` | 锁定内置（`auto`/`light`/`dark`/`dark-ansi`）、静态主题或已注册的插件主题，优先于持久化选择 |
 | `DSH_TUI_DISABLE_MOUSE` | 在 fullscreen 模式临时关闭鼠标处理 |
+| `DSH_TUI_DISABLE_TERMINAL_IMAGES` | 设为 `1` 时强制关闭 Kitty/Sixel 探测、预览读取/解码与终端图片渲染，优先于 config 和 /settings；保留文字信息 |
+| `DSH_TUI_IMAGE_PROTOCOL` | `auto`（默认）、`kitty`、`sixel` 或 `none`；覆盖协议选择，但不绕过图片预览偏好、禁用开关、非全屏、无障碍和多路复用器限制 |
 | `DSH_TUI_RESUME_SESSION` | 启动时恢复指定会话，通常由启动器设置 |
 | `DSH_TUI_WORKSPACE_TARGET` | 启动时解析的工作区路径或 URI，通常由 `dsh-tui <目标>` 设置 |
 | `DSH_TUI_SESSION_ROOT` | 覆盖 JSONL 会话根目录；profile 默认 `$DSH_HOME/sessions`，裸 `cordis.yml` 默认 `~/.dsh-tui/sessions` |
@@ -165,9 +183,25 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、
 `DSH_TUI_RENDER_LOG` 可能捕获屏幕上可见的提示词、工具参数和输出，不应上传到
 公开 issue，除非已经检查并脱敏。
 
-## `/provider`：运行时添加模型提供方
+## `/provider`：运行时管理模型提供方
 
-`/provider` 打开交互向导，无需重启即可添加模型提供方：
+`/provider` 打开交互向导，无需重启即可管理模型提供方。向导第一步选择动作：
+
+- **添加新 provider**：内置目录或自定义 API 端点（见下）。
+- **编辑已有 provider**：从**用户配置层**已写入的路由中选择（组合 base
+  继承来的 provider 无法从用户层删除，不进入编辑/删除菜单），进入编辑菜单
+  ——内置 provider 可选 **编辑 API Key**、**编辑模型列表**、**删除该
+  provider**；自定义端点额外提供 **编辑 Base URL** 与 **编辑 wire
+  protocol**（内置路由即使 profile 显式写了 `api` 覆盖，仍按内置对待）。任一
+  编辑项改完只原地修补所选项那一个字段并立即退出，无需再确认——profile 其余
+  字段（含 `headers`、`timeoutMs`、`retryPolicy` 等 TUI 未建模的键）完全不
+  进写入，原样保留；「编辑模型列表」会自动勾选当前已启用的模型，勾选项的
+  模型条目同样原样保留。唯一例外是「删除该 provider」，需先确认，确认后
+  移除 profile 与 API key——环境变量来源的密钥、以及与其他 provider 共用的
+  密钥引用会保留、只删配置；若 profile 已删而密钥清理失败，会明确提示
+  手动处理（provider 本身已删除生效）。
+
+**添加**分支支持以下来源（第三种按挂载条件出现）：
 
 - **内置 provider**：从 `llm.listConfigurableProviders()` 列出的 catalog
   路由（openai、anthropic、deepseek 等）中选择，只需输入 API key；baseURL
@@ -175,18 +209,27 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、
 - **自定义 API 端点**：输入路由名、API key、baseURL 与协议
   （`openai-completions` / `openai-responses` / `anthropic-messages`），
   向导会用草稿凭据探测端点公布的模型供勾选（探测失败则手输模型 id）。
+- **订阅账号登录（OAuth）**：仅当捆绑的 dsh-auth 插件挂载时多出该选项——从
+  向导列出的订阅账号（ChatGPT / Claude / Grok 等）中选择一个，走浏览器授权 /
+  设备码流程用官方订阅登录，**无需 API key**；列表中每个账号都带遮蔽的登录态
+  标注（已登录显示令牌到期时间，过期会注明），已登录的账号可选**重新登录**
+  （换账号或刷新凭据）或**登出**（删除本地保存的 OAuth 凭据）。凭据存储与路由
+  注册由 dsh-auth 拥有，`/auth status|login|logout` 与此分支同源。未挂载
+  dsh-auth 时选项不出现，向导与之前完全一致；挂载了插件但没有可 OAuth 登录的
+  provider 时会给出提示。
 
-写入产物（profile 启动时，dsh-base 提供 settings/credentials 服务）：
+写入/删除产物（profile 启动时，dsh-base 提供 settings/credentials 服务）：
 
 | 产物 | 位置 |
 | --- | --- |
-| provider profile | `~/.dsh/settings.yaml` 的 `llm-pi-ai.providers.<路由名>`，写入即注册路由 |
+| provider profile | `~/.dsh/settings.yaml` 的 `llm-pi-ai.providers.<路由名>`，写入即注册路由，删除即注销 |
 | API key | `~/.dsh/.credentials.yaml`（0600），引用名为 `<路由名大写>_API_KEY` |
 
 密钥答案在会话记录中只显示 `••••••`；若进程环境已有同名变量，则跳过写入、
-运行时直接从环境解析。配置与 dsh web 端的 Models 设置页互通（同一 settings
-section）。裸 `dsh --config cordis.yml` 启动没有这些服务，`/provider` 会提示
-不可用。添加完成后运行 `/model` 即可切换到新路由的模型。
+运行时直接从环境解析，删除时也不会触碰环境变量。配置与 dsh web 端的 Models
+设置页互通（同一 settings section）。裸 `dsh --config cordis.yml` 启动没有
+这些服务，`/provider` 会提示不可用。添加/编辑完成后运行 `/model` 即可切换
+到新路由的模型。
 
 ## 组合约束
 

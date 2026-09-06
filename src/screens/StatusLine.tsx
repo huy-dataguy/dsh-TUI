@@ -7,10 +7,16 @@ import { formatContextUsage, DEFAULT_STATUS_BAR, normalizeStatusBar, type Status
 import { estimateSessionCostCny, estimateSessionCostSplitCny, isDeepSeekOfficialProvider, isPeakHour } from '../deepseekPricing.js'
 import { ActivityLine, contextPressurePct } from '../components/ActivityLine.js'
 import { GoalStatusChip } from '../components/GoalTodoPanel.js'
+import { formatJobDuration, type BackgroundJobState } from '../dsh-adapter/jobs.js'
+
+/** Stable fallback for stubbed channels: verify/repro harnesses render the
+ *  real Chat with partial channel literals that predate the jobs field. */
+const NO_BACKGROUND_JOBS: readonly BackgroundJobState[] = []
 import type { Channel } from '../dsh-adapter/channel.js'
 import { modeDisplayName } from '../sessionModes.js'
 import { MiniWake } from '../components/trajectory/MiniWake.js'
 import { ContextBarView } from '../components/ContextBarView.js'
+import { TooltipTarget } from '../components/Tooltip.js'
 import { formatProject } from '../sessions/format.js'
 import { homeDir } from '../utils/paths.js'
 import {
@@ -48,6 +54,9 @@ type HoverTarget =
   | 'tokens'
   | 'cost'
   | 'goal'
+  | 'jobs'
+  | 'model'
+  | 'git'
   | 'sessionId'
   | 'cwd'
   | 'title'
@@ -60,6 +69,10 @@ type FieldPart = {
   node: React.ReactNode
   /** Present when the field shows a detail readout on hover. */
   id?: HoverTarget
+  /** Present when the field's own text may be truncated: hovering pops a
+   *  tooltip with the full string (e.g. the session title, cut mid-word
+   *  when the right-aligned group runs out of columns). */
+  tooltip?: string
 }
 
 /**
@@ -91,7 +104,13 @@ function FieldLine({
             flexShrink={1}
             {...(part.id === undefined ? {} : hoverProps(part.id))}
           >
-            <Text wrap="truncate">{part.node}</Text>
+            {part.tooltip === undefined || part.tooltip === '' ? (
+              <Text wrap="truncate">{part.node}</Text>
+            ) : (
+              <TooltipTarget content={part.tooltip}>
+                <Text wrap="truncate">{part.node}</Text>
+              </TooltipTarget>
+            )}
           </Box>
         </React.Fragment>
       ))}
@@ -151,7 +170,10 @@ export function StatusLine({
       node: <Text color="inactiveShimmer">{channel.reasoningEffort}</Text>,
     })
   }
-  if (statusBar.mode && channel.modeIndex > 0) {
+  const modeNeedsExplicitMarker = channel.mode.plan === true
+    || channel.mode.sandbox === 'danger-full-access'
+    || channel.mode.approval === 'never'
+  if (statusBar.mode && (channel.modeIndex > 0 || modeNeedsExplicitMarker)) {
     contextParts.push({
       key: 'mode',
       node: (
@@ -258,11 +280,33 @@ export function StatusLine({
     }
   }
 
+  // Background-job chip (ctx.jobs; /jobs): live count of running/stopping
+  // jobs, shown only while non-zero — a silent zero is not information.
+  // Not preference-gated: it is transient situational state like the goal
+  // chip, not chrome. Hover lists the live jobs with elapsed times.
+  // Marker is ●, NOT ⚙ (U+2699 is EA-ambiguous: ink measures 1 cell, CJK
+  // terminal fonts paint 2 → the count overlaps the glyph).
+  const liveJobs = (channel.backgroundJobs ?? NO_BACKGROUND_JOBS).filter(
+    job => job.status === 'running' || job.status === 'stopping',
+  )
+  const jobsPart: FieldPart | undefined = liveJobs.length === 0
+    ? undefined
+    : {
+        key: 'jobs',
+        id: 'jobs',
+        node: (
+          <Text color="toolDotTask">
+            {'● '}{liveJobs.length}
+          </Text>
+        ),
+      }
+
   const leftFields: FieldPart[] = [
     ...(statusBar.model
-      ? [{ key: 'model', node: <Text color="inactiveShimmer">{channel.model}</Text> }]
+      ? [{ key: 'model', id: 'model' as const, node: <Text color="inactiveShimmer">{channel.model}</Text> }]
       : []),
     ...(tpsPart !== undefined ? [tpsPart] : []),
+    ...(jobsPart !== undefined ? [jobsPart] : []),
     ...contextParts,
     ...(statusBar.tokens
       ? [{
@@ -310,6 +354,7 @@ export function StatusLine({
       ? [
           {
             key: 'git',
+            id: 'git' as const,
             node: <Text color="professionalBlue">{channel.gitBranch}</Text>,
           },
         ]
@@ -329,6 +374,9 @@ export function StatusLine({
       ? [{
           key: 'title',
           id: 'title' as const,
+          // The title truncates mid-word when the right-aligned group
+          // overflows; the tooltip carries the full string.
+          tooltip: channel.sessionTitle,
           node: <Text dimColor>{channel.sessionTitle}</Text>,
         }]
       : []),
@@ -607,6 +655,39 @@ function buildHoverDetail(
         <Text wrap="truncate">
           {dim('goal ')}{goal.phase} · {dim('r')}{goal.roundsStarted}/{goal.maxGoalRounds} ·{' '}
           {goal.objective}
+        </Text>
+      )
+    }
+    case 'jobs': {
+      const live = (channel.backgroundJobs ?? NO_BACKGROUND_JOBS).filter(
+        job => job.status === 'running' || job.status === 'stopping',
+      )
+      if (live.length === 0) return null
+      const shown = live.slice(0, 3)
+      const rest = live.length - shown.length
+      return (
+        <Text wrap="truncate">
+          {dim('jobs ')}
+          {shown.map(job => `${job.id} ${job.label} (${formatJobDuration(job)})`).join(' · ')}
+          {rest > 0 ? ` · +${rest}` : ''}
+        </Text>
+      )
+    }
+    case 'model': {
+      return (
+        <Text wrap="truncate">
+          {dim('model ')}{channel.model} · {dim('provider ')}{channel.provider}
+          {channel.contextWindow !== undefined
+            ? <> · {dim('ctx ')}{formatTokens(channel.contextWindow)}</>
+            : null}
+        </Text>
+      )
+    }
+    case 'git': {
+      if (channel.gitBranch === undefined) return null
+      return (
+        <Text wrap="truncate">
+          {dim('git ')}{channel.gitBranch}
         </Text>
       )
     }
