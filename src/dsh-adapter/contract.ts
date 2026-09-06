@@ -16,18 +16,18 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 /** Primary validated upstream line (newest). */
-export const UPSTREAM_VALIDATED_VERSION = '0.1.2-rc.1'
+export const UPSTREAM_VALIDATED_VERSION = '0.1.3-alpha.1'
 
 /**
  * Explicitly supported upstream prerelease lines, oldest first.
  *
- * 0.1.2-rc.1 = primary continuous-CI line; alpha.5, alpha.4, and alpha.3 are
- * mapped compatibility lines source-checked when the primary line moves;
- * 0.1.1-rc.2 and rc.1 are compatibility lines (install- and
- * type-level compatibility); 0.1.0-rc.8 = previous family (full CI coverage);
- * 0.1.0-rc.7 = full CI coverage as well; 0.1.0-rc.6 = legacy line
- * (install- and type-level compatibility, feature surface may lack later
- * additions — new features must degrade gracefully there).
+ * 0.1.3-alpha.1 = primary continuous-CI line; 0.1.2-rc.1 is the previous
+ * continuous-CI line; alpha.5, alpha.4, and alpha.3 are mapped compatibility
+ * lines source-checked when the primary line moves; 0.1.1-rc.2 and rc.1 are
+ * compatibility lines (install- and type-level compatibility); 0.1.0-rc.8 =
+ * previous family (full CI coverage); 0.1.0-rc.7 = full CI coverage as well;
+ * 0.1.0-rc.6 = legacy line (install- and type-level compatibility, feature
+ * surface may lack later additions — new features must degrade gracefully there).
  * The peer range in package.json is deliberately wider than this list: an
  * install on an older or newer line is allowed but reports drift at boot.
  */
@@ -41,6 +41,7 @@ export const UPSTREAM_VALIDATED_VERSIONS = [
   '0.1.2-alpha.4',
   '0.1.2-alpha.5',
   '0.1.2-rc.1',
+  '0.1.3-alpha.1',
 ] as const
 
 /**
