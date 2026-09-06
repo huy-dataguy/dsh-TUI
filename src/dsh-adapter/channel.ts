@@ -7980,7 +7980,9 @@ export function createChannel(
           ...(descriptions === undefined ? {} : { descriptions }),
           tag: descriptor.input?.hint,
           external: true,
-          acceptsImages: descriptor.input?.images === true,
+          acceptsImages:
+            (descriptor.input as unknown as { images?: boolean; attachments?: boolean })?.images === true ||
+            (descriptor.input as unknown as { attachments?: boolean })?.attachments === true,
           // Skills reach the registry as ordinary commands, so the menu would
           // lose the marker HelpMenu uses to keep them out of the chrome list.
           // This channel registered them and is the authority on which names
